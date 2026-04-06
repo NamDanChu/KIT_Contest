@@ -1,0 +1,66 @@
+# KIT_Contest 저장소 전체 — 비밀·로컬·캐시 제외
+
+# --- OS / 편집기 ---
+.DS_Store
+Thumbs.db
+Desktop.ini
+.idea/
+.vscode/
+*.swp
+*~
+
+# --- Python (전체 하위 경로) ---
+**/__pycache__/
+**/*.py[cod]
+**/$py.class
+**/.Python
+**/*.so
+**/.venv/
+**/venv/
+**/env/
+**/.eggs/
+**/*.egg-info/
+**/dist/
+**/build/
+**/.pytest_cache/
+**/.mypy_cache/
+**/.ruff_cache/
+**/.coverage
+**/htmlcov/
+**/*.cover
+
+# --- 환경 변수·비밀 (예시 파일은 커밋 가능) ---
+**/.env
+**/.env.*
+!**/.env.example
+!**/.env.sample
+
+# --- Streamlit ---
+**/.streamlit/secrets.toml
+**/.streamlit/secrets.local.toml
+
+# --- Google / Firebase / GCP 자격 증명 ---
+**/*firebase-adminsdk*.json
+**/*-firebase-adminsdk-*.json
+**/firebase-service-account.json
+**/google-services.json
+**/GoogleService-Info.plist
+**/application_default_credentials.json
+**/gcloud-application-credentials.json
+
+# --- 로컬 데이터 (Chroma 등) ---
+**/chroma_data/*
+!**/chroma_data/.gitkeep
+
+# --- 로그·임시 ---
+**/*.log
+**/logs/
+**/.cache/
+**/tmp/
+**/temp/
+
+# --- Jupyter ---
+**/.ipynb_checkpoints/
+
+# --- Node (향후 도입 시) ---
+**/node_modules/

@@ -1,0 +1,43 @@
+# EduChain_AI — 비밀·로컬 전용 (저장소 루트 `KIT_Contest/.gitignore`와 함께 적용)
+# 이 폴더만 따로 복사해 쓸 때를 대비해 핵심 항목을 반복합니다.
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+env/
+
+# 환경·비밀
+.env
+.env.*
+!.env.example
+!.env.sample
+
+# Streamlit
+.streamlit/secrets.toml
+.streamlit/secrets.local.toml
+
+# Google AI / Gemini 등 (환경 변수 파일로 둘 때)
+.env.local
+
+# Firebase·GCP 서비스 계정 JSON (파일명 패턴 전부 제외)
+firebase-service-account.json
+*firebase-adminsdk*.json
+*-firebase-adminsdk-*.json
+google-services.json
+application_default_credentials.json
+
+# 로컬 벡터 DB·업로드 캐시
+chroma_data/*
+!chroma_data/.gitkeep
+
+# 테스트·도구 캐시
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# 로그
+*.log
