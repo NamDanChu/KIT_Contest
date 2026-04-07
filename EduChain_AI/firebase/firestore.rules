@@ -1,0 +1,75 @@
+rules_version = '2';
+
+// Firebase 콘솔 → Firestore → 규칙 에 이 내용을 붙여 넣어 배포합니다.
+// ※ firebase-admin(서비스 계정)으로 접근하는 요청은 이 규칙을 우회합니다.
+//    웹/모바일 클라이언트 SDK로 직접 Firestore에 붙을 때만 적용됩니다.
+//
+// 개발 초안: 인증된 사용자만 읽기 허용, 쓰기는 단계적으로 강화하세요.
+// 제출·상용 전: org_id / role 기준으로 match 블록을 세분화하세요.
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function userDoc() {
+      return get(/databases/$(database)/documents/Users/$(request.auth.uid)).data;
+    }
+
+    function sameOrg(orgId) {
+      return request.auth != null
+        && exists(/databases/$(database)/documents/Users/$(request.auth.uid))
+        && userDoc().org_id == orgId;
+    }
+
+    function isTeacherOrOperator() {
+      return exists(/databases/$(database)/documents/Users/$(request.auth.uid))
+        && (userDoc().role == 'Teacher' || userDoc().role == 'Operator');
+    }
+
+    match /Organizations/{orgId} {
+      allow read: if request.auth != null;
+      allow write: if false;
+
+      // 수업(카테고리) — 동일 org 소속 사용자만 읽기. 쓰기는 Admin SDK(앱 서버) 전용.
+      match /ContentCategories/{categoryId} {
+        allow read: if sameOrg(orgId);
+        allow write: if false;
+
+        match /LessonWeeks/{weekId} {
+          allow read: if sameOrg(orgId);
+          allow write: if false;
+        }
+
+        // 학생 AI 질문 로그 — 생성은 본인 student_uid, 학생 본인·교사·운영자 읽기
+        match /StudentLessonQuestions/{qid} {
+          allow create: if request.auth != null
+            && request.resource.data.student_uid == request.auth.uid
+            && request.resource.data.org_id == orgId
+            && request.resource.data.category_id == categoryId;
+          allow read: if request.auth != null && (
+            resource.data.student_uid == request.auth.uid
+            || (sameOrg(orgId) && isTeacherOrOperator())
+          );
+          allow update, delete: if false;
+        }
+      }
+    }
+
+    match /Users/{userId} {
+      allow read: if request.auth != null && request.auth.uid == userId;
+      allow write: if false;
+    }
+
+    // 학생 본인만 시청 진행률(주차별)·퀴즈 제출 스냅샷 읽기·쓰기 — 웹 SDK + 커스텀 토큰 자동 저장용
+    match /Users/{userId}/LessonProgress/{docId} {
+      allow read, create, update: if request.auth != null && request.auth.uid == userId;
+      allow delete: if false;
+    }
+
+    match /ChatLogs/{logId} {
+      allow read: if request.auth != null;
+      allow create: if request.auth != null
+        && request.resource.data.uid == request.auth.uid;
+      allow update, delete: if false;
+    }
+  }
+}

@@ -1,9 +1,9 @@
-"""Firebase Auth 연동 스텁. 구현 시 firebase-admin 또는 클라이언트 SDK 사용."""
+"""Firebase 인증 — 이메일·Google은 `firebase_auth_rest` / `google_oauth_flow` 사용."""
 
+from __future__ import annotations
 
-def sign_in(email: str, password: str) -> str:
-    raise NotImplementedError("Firebase Auth 연동 후 구현")
+from .auth_session import clear_auth_session
 
 
 def sign_out() -> None:
-    raise NotImplementedError("Firebase Auth 연동 후 구현")
+    clear_auth_session()

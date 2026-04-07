@@ -51,6 +51,7 @@
 | `org_name` | 기업/학원명 |
 | `max_slots` | 구매 학생 슬롯 수 |
 | `plan` | 요금제 (Starter / Pro / Enterprise 등) |
+| `owner_uid` | 기업을 등록한 운영자 UID (관리 화면에서 목록 필터) |
 
 ### `Users`
 
@@ -58,6 +59,7 @@
 |------|------|
 | `uid` | Firebase Auth UID (PK) |
 | `email` | 이메일 |
+| `display_name` | 표시 이름 |
 | `role` | `Teacher` / `Student` / `Operator` |
 | `org_id` | 소속 조직 (FK) |
 
@@ -73,6 +75,18 @@
 **격리 원칙(발표용 포인트)**  
 쿼리·보안 규칙에서 **`org_id`(및 필요 시 `uid`)** 기준으로 데이터가 섞이지 않게 설계한다는 메시지와 맞추면 됨.
 
+### 3.1 확장 — 콘텐츠 카테고리·주차·학습 기록 (현재 코드 기준)
+
+| 경로 | 설명 |
+|------|------|
+| `Organizations/{org_id}/ContentCategories/{category_id}` | 수업(카테고리). `teacher_uids`, `student_uids`, `name`, `description`, `teacher_overview`, **`operator_feedback_teacher`**, **`operator_feedback_student`**(운영자→교사/학생 메모) 등 |
+| `.../ContentCategories/{category_id}/LessonWeeks/{week_doc_id}` | 주차별 수업 설계. `week_index`, `title`, `learning_goals`, `lesson_video_url`, `live_session_active`, 공개·기간(`access_mode`, `window_*`) 등 |
+| `Users/{uid}/LessonProgress/{doc_id}` | 학생·수업·주차별 **시청 진행률** `progress_percent`(0~100), 영상 재생 위치 **`last_video_position_sec`**, **`video_duration_sec`**(클라이언트 주기 저장). **퀴즈(마지막 제출 스냅샷)**: `quiz_correct` / `quiz_total`, `quiz_passed`, **`quiz_attempt_count`**(제출할 때마다 +1), **`quiz_wrong_indices`**(0-based 오답 문항 인덱스), `quiz_wrong_count`. `doc_id`는 org+category+week 해시 규칙 |
+| `.../ContentCategories/{category_id}/StudentLessonQuestions/{doc_id}` | 해당 수업에서 학생 **AI 채팅 질문·답변** 로그. `question`, `answer`, `week_doc_id`, `week_title`, **`video_position_sec`**, **`video_position_label`** 등(질문 시점 영상 위치) |
+
+**기타**  
+- `ChatLogs` — 범용 채팅 로그(초기 설계). 학생 수강 AI는 위 `StudentLessonQuestions`에 **수업·주차 맥락**을 붙여 저장하는 쪽으로 보강됨.
+
 ---
 
 ## 4. 역할별 화면·기능
@@ -83,6 +97,34 @@
 | **Teacher** | PDF 업로드 → 키워드·객관식 퀴즈 자동 생성 | 업로드 + 퀴즈 미리보기·편집 |
 | **Student** | 교안 기반 RAG Q&A (페이지·맥락 인용) | 좌: 자료 / 우: 챗봇 |
 | **Operator** | 가입 학생 수 vs `max_slots`, 질문 빈도 등 | 지표 카드 + 그래프, 슬롯 확장 시연 |
+
+**운영자 전용 내비·기업 관리 UX** (사이드바는 로그인·관리 중심, 기업 선택 후 세부 기능): `기획/운영_관리_UX.md`
+
+### 4.1 현재 앱 구조 (실행 코드: `EduChain_AI/`)
+
+| 페이지 / 모듈 | 역할 요약 |
+|---------------|-----------|
+| `Home.py` | 진입, 멀티페이지 네비, 로그인 시 사용자 블록 |
+| `pages/1_Login.py` | 이메일·Google·초대 가입 |
+| `pages/2_관리.py` | 운영자: 기업·플랜·슬롯·사용자·콘텐츠 카테고리·교사 배치 |
+| `pages/3_Teacher.py` | 교사: 수업 선택 후 **개요** / **학생 관리** / **수업 통계** / **수업 관리**(주차·영상·AI·질문 로그 등) |
+| `pages/4_학생관리.py` | (교사 전용 플로우 연결용) 학생 관리 보조 |
+| `pages/5_Student.py` | 학생: **개요** → 수업 선택 → **수업 개요** / **수업 수강**(주차 목록·영상 플레이어·우측 패널) |
+| `services/student_portal.py` | 학생 개요·주차 목록·수강 플레이어(YouTube/Vimeo/HTML5, 진행률 저장, 우측 AI/라이브/개요) |
+| `services/sidebar_helpers.py` | 교사/학생 사이드바, `st.fragment` 복구 CSS 등 |
+| `services/lesson_mgmt_ui.py` | 교사 수업 관리 패널(주차 CRUD, 영상 URL, 라이브 토글 등) |
+| `services/course_stats_ui.py` | **수업 통계**(교사·운영자 공통): 수강 인원, 주차 카드·상세(해당 주차 **퀴즈 응시·제출·오답 합·문항별 오답 빈도**), 질문 요약, **전체 퀴즈 집계**(응시 횟수 합·제출 건수·오답 문항 수 합), Gemini **수업 전반 분석**(`quiz_block`에 집계 반영), 운영자 모드 시 피드백·**AI 교사 피드백 초안** |
+| `services/mgmt_content.py` | 운영자 콘텐츠: 카테고리·교사 배치(설명·하위 JSON 필드는 UI에서 제거, DB 기존값 유지) |
+| `services/gemini_client.py` | 수업 통계 분석(`analyze_course_statistics`, `quiz_block`), **학습 프로필 분석**(`analyze_student_learning_profile` — **퀴즈 요약 `quiz_summary_block`** 포함), 운영자 피드백 초안, 주차 맥락 질문 답변(`answer_student_lesson_question`) 등 |
+
+**학생 수강 UX 요약**  
+- 사이드바: 개요, 수업 선택(selectbox), 수업 개요 / 수업 수강.  
+- **수업 수강**에서 주차 선택 시 전체폭 플레이어: 왼쪽 영상(`components.html` + Firebase로 진행률), 오른쪽 라이브·AI 채팅·주차 개요.  
+- **Streamlit `st.fragment`(≥1.33)** 으로 우측만 갱신해 영상 iframe 재마운트를 줄임; 우측 패널 접기 시 CSS로 열 비율 조정.  
+- 저장된 `progress_percent`로 재생 시작 위치 근처 **seek**(YouTube/Vimeo/HTML5).  
+- AI 질문은 Firestore `StudentLessonQuestions`에 저장 → 교사 **개요** 탭에서 **학생 AI 질문** 목록으로 확인. 질문 시점 **영상 위치**(초·라벨) 저장 가능.
+- **교사** **수업 통계**·**학생 관리**(정보 보기): 주차별 완료·질문·**퀴즈(응시·오답·틀린 문항 지문)**·Gemini 분석(**학생 분석에 퀴즈 요약 반영**); 분석 결과는 **expander**로 접기.
+- **운영자** **콘텐츠·통계**: 과목별로 교사와 동일한 통계·운영자→교사/학생 피드백·AI 초안; **학생 수업 개요**에 운영자 공지 표시.
 
 ---
 
@@ -126,12 +168,16 @@
 
 ### 실제 구현 시 반드시 만들어야 하는 것(체크리스트)
 
-- [ ] Firestore 컬렉션·필드 생성 및 **보안 규칙**(조직/역할 기준 읽기·쓰기)  
-- [ ] 가입 시 `Users` 문서 생성, `org_id`·`role` 연결 로직  
-- [ ] Teacher: PDF → 청크 → 임베딩 → ChromaDB, 퀴즈 생성 프롬프트  
-- [ ] Student: 질의 → 벡터 검색 → 컨텍스트 + Gemini 답변, `ChatLogs` append  
-- [ ] Operator: 집계 쿼리(또는 Cloud Function) + 슬롯 시연(데모면 Firestore 필드 업데이트로도 가능)  
-- [ ] 환경 변수: Firebase 키, Gemini API 키, Chroma 저장 경로(클라우드에서는 영속 볼륨 또는 제약 안내)  
+세부 구현·검증 순서는 `기획/개발순서.md`와 맞춥니다.
+
+- [x] Firestore 컬렉션·필드 생성 및 **보안 규칙**(조직/역할 기준 읽기·쓰기)  
+- [x] 가입 시 `Users` 문서 생성, `org_id`·`role` 연결 로직  
+- [x] Teacher: PDF → 청크 → 임베딩 → ChromaDB, 퀴즈 생성 프롬프트  
+- [x] Student: 질의 → 벡터 검색 → 컨텍스트 + Gemini 답변, `ChatLogs` append  
+- [x] Operator: 집계 쿼리(또는 Cloud Function) + 슬롯 시연(데모면 Firestore 필드 업데이트로도 가능)  
+- [x] 환경 변수: Firebase 키, Gemini API 키, Chroma 저장 경로(클라우드에서는 영속 볼륨 또는 제약 안내)  
+
+**※** 위 항목은 **기획·설계 관점에서의 완료**로 표시했습니다. **실제 코드 진행도**는 `기획/개발순서.md`를 따릅니다(예: 1단계 Firestore 연결 완료 후, 2단계 인증·3단계 RAG 등).
 
 ---
 
@@ -142,27 +188,26 @@
 ```
 KIT_Contest/
 ├── 기획/
-│   └── EduChain_AI_전체정리.md    # 본 문서
-├── 정리폴더/
-│   └── 기본정리.md
-├── app/                            # (선택) Streamlit 진입점 분리 시
-│   └── main.py                     # st.set_page_config, 라우팅/세션
-├── pages/                          # Streamlit 멀티페이지 시
-│   ├── 1_로그인.py
-│   ├── 2_교사.py
-│   ├── 3_학생.py
-│   └── 4_운영자.py
-├── services/                       # 비즈니스 로직
-│   ├── firebase_auth.py            # 로그인·토큰·세션
-│   ├── firestore_repo.py           # Organizations / Users / ChatLogs CRUD
-│   ├── rag_pipeline.py             # PDF 로드, 청킹, Chroma upsert, query
-│   └── gemini_client.py            # 퀴즈·채팅 호출
-├── chroma_data/                    # 로컬 Chroma persist (gitignore 권장)
-├── .streamlit/
-│   └── secrets.toml                # API 키 (로컬만, 저장소에 커밋 금지)
-├── requirements.txt
-├── firebase-service-account.json   # 서버용 시 (절대 공개 저장소에 올리지 말 것)
-└── README.md
+│   ├── EduChain_AI_전체정리.md    # 본 문서
+│   └── 진행중상황.md              # 구현 진행·다음 작업
+├── EduChain_AI/                    # 실제 Streamlit 앱 루트
+│   ├── Home.py
+│   ├── pages/
+│   │   ├── 1_Login.py
+│   │   ├── 2_관리.py
+│   │   ├── 3_Teacher.py
+│   │   ├── 4_학생관리.py
+│   │   └── 5_Student.py
+│   ├── services/
+│   │   ├── firebase_app.py, auth_session.py, firestore_repo.py
+│   │   ├── student_portal.py, lesson_mgmt_ui.py, lesson_access.py
+│   │   ├── sidebar_helpers.py, gemini_client.py, rag_pipeline.py
+│   │   ├── session_keys.py, plan_limits.py, …
+│   ├── views/                      # placeholder 등 보조
+│   ├── .streamlit/secrets.toml
+│   └── requirements.txt            # streamlit>=1.33 권장(fragment)
+├── chroma_data/                    # 로컬 Chroma (gitignore 권장)
+└── …
 ```
 
 ### 메커니즘 요약
@@ -302,4 +347,23 @@ services/adapters/  → Firebase·Gemini 구체 구현 (필요 시 분리)
 
 ---
 
-이 문서는 `정리폴더/기본정리.md`와 동일한 범위를 유지하면서, **실행 순서·시스템 경계·폴더 역할**을 보강했고, **섹션 9·10**에서 Streamlit UI 세팅과 **SOLID·응집/결합** 원칙을 추가했습니다. 세부 파일명은 첫 커밋 시점에 맞춰 `기획` 문서를 한 번 더 고치면 됩니다.
+이 문서는 `정리폴더/기본정리.md`와 동일한 범위를 유지하면서, **실행 순서·시스템 경계·폴더 역할**을 보강했고, **섹션 9·10**에서 Streamlit UI 세팅과 **SOLID·응집/결합** 원칙을 추가했습니다.
+
+---
+
+## 12. 구현 스냅샷 (2026-04, 코드 기준)
+
+아래는 **기획 대비 실제 구현된 범위**를 한 번에 보기 위한 요약입니다. 세부 진행·미완은 `기획/진행중상황.md`를 본다.
+
+| 영역 | 구현 내용 |
+|------|-----------|
+| 인증·운영자 | Firebase Auth, `Users`/`Organizations`, 관리 화면(플랜·슬롯·초대·콘텐츠 카테고리·교사 배치). **콘텐츠 탭**에서 과목별 **수업 통계**(교사 화면과 동일 UI)·**운영자 피드백**(교사/학생용 필드)·**AI 교사 피드백 초안** |
+| 교사 | 수업 선택, **개요**·**학생 관리**·**수업 통계**·**수업 관리**. 개요: 운영자 피드백 표시, 학생 AI 질문·영상 위치. **학생 관리**: 학생별 상세·주차 질문·**주차별 퀴즈·오답(지문 일부)**·**학생 AI 분석**(프롬프트에 **퀴즈 요약** 포함). **수업 통계**: 주차 카드·질문·**퀴즈 집계**(전체·선택 주차)·**수업 전반 AI 분석**(퀴즈 집계 문자열 반영, expander) |
+| 학생 | 개요, 수업 개요(**운영자 공지**), **주차별 수강** + 영상 진행률·**재생 위치 스냅샷** + 우측 AI 채팅 + **주차 퀴즈** 제출 시 오답 인덱스·응시 횟수 저장(`merge_student_lesson_quiz_result`) |
+| 데이터·집계 | `LessonWeeks`, `LessonProgress`(진행률·영상 초·**퀴즈 필드**), `StudentLessonQuestions`(질문+영상 위치), 카테고리에 운영자 피드백 필드. **`aggregate_quiz_stats_for_course`** 로 배정 학생×주차 퀴즈 집계 |
+| UX | `session_keys` 상수, 사이드바(교사: 수업 통계 메뉴), 수강 플레이어 `st.fragment`·CSS, **AI 분석 긴 본문은 expander**로 스크롤 부담 완화 |
+
+**아직 기획서 전체와의 갭·보완 포인트**  
+- **퀴즈 데이터 일관성**: 구버전 제출만 있고 `quiz_attempt_count` 등이 비어 있으면 UI상 “응시 0회” 등과 불일치할 수 있음 → 재제출 또는 마이그레이션 검토.  
+- **오답 지문 표시**: `get_lesson_week`로 읽은 주차에 퀴즈 문항이 없거나 수업 관리와 불일치하면 **지문 미수록** 안내만 표시됨.  
+- 운영자 **기업 단위** 대시보드(슬롯 vs 인원 차트 등), **Chroma/RAG**와 수강 AI의 단일 플로우, Streamlit Cloud·**Firestore 보안 규칙** 하드닝 등은 `진행중상황.md`의 **보완·다음 단계**를 참고한다.
