@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import html
 import json
+import random
 import re
 import time
 from typing import Any
@@ -13,6 +14,7 @@ from firebase_admin import auth as fb_auth
 import streamlit.components.v1 as components
 
 from services import gemini_client
+from services import ui_messages
 from services.firebase_app import init_firebase
 from services.firestore_repo import (
     append_student_lesson_question,
@@ -25,7 +27,15 @@ from services.firestore_repo import (
     merge_student_lesson_quiz_result,
     reset_student_lesson_quiz_progress,
 )
-from services.quiz_items import quiz_session_params
+from services.quiz_items import (
+    draw_quiz_pool_indices,
+    parse_quiz_pool_indices_saved,
+    quiz_pass_min_for_session,
+    quiz_pool_for_week,
+    quiz_preview_session_pair,
+    quiz_session_params,
+    quiz_want_count,
+)
 from services.lesson_access import week_in_student_list, week_is_visible_to_student
 from services.session_keys import (
     AUTH_DISPLAY_NAME,
@@ -563,7 +573,7 @@ def _render_simple_video_embed(video_url: str) -> None:
     """자동 진행률 없이 기존 방식(iframe / st.video)만 표시."""
     raw = (video_url or "").strip()
     if not raw:
-        st.info("등록된 영상 URL이 없습니다. 담당 교사의 **수업 관리**에서 영상 링크를 등록하면 여기에 표시됩니다.")
+        ui_messages.info_video_url_empty_student()
         return
     yt = _youtube_embed_src(raw)
     vm = _vimeo_embed_src(raw)
@@ -617,7 +627,7 @@ def _render_video_area(
 ) -> None:
     raw = (video_url or "").strip()
     if not raw:
-        st.info("등록된 영상 URL이 없습니다. 담당 교사의 **수업 관리**에서 영상 링크를 등록하면 여기에 표시됩니다.")
+        ui_messages.info_video_url_empty_student()
         return
 
     want_auto = bool(
@@ -923,6 +933,8 @@ def _render_quiz_exam_fullpage(
     step_key = f"stu_quiz_step_{wid}"
     active_key = f"stu_quiz_active_{wid}"
 
+    ix_key = f"stu_quiz_pool_indices_{wid}"
+
     def _back_to_week_list() -> None:
         st.session_state.pop(STUDENT_QUIZ_WEEK_ID, None)
         st.session_state.pop(f"stu_quiz_started_{wid}", None)
@@ -931,6 +943,7 @@ def _render_quiz_exam_fullpage(
         st.session_state.pop(active_key, None)
         st.session_state.pop(f"stu_quiz_buf_{wid}", None)
         st.session_state.pop(f"stu_quiz_buf_sync_{wid}", None)
+        st.session_state.pop(ix_key, None)
         st.session_state[STUDENT_VIEW_TAB] = "course"
         st.session_state[STUDENT_COURSE_SUB_TAB] = "learn"
         st.switch_page("pages/5_Student.py")
@@ -954,15 +967,41 @@ def _render_quiz_exam_fullpage(
             _back_to_week_list()
         return
 
-    session, pass_min = quiz_session_params(week)
+    prog = get_student_lesson_progress_fields(uid, org_id, category_id, wid)
+    pct = int(prog.get("progress_percent") or 0)
+
+    pool = quiz_pool_for_week(week)
+    want = quiz_want_count(week)
+    tq_prog = int(prog.get("quiz_total") or 0)
+    saved_pi = parse_quiz_pool_indices_saved(prog.get("quiz_pool_indices"), len(pool))
+
+    if tq_prog > 0 and len(saved_pi) == tq_prog:
+        session = [pool[i] for i in saved_pi if 0 <= i < len(pool)]
+        if len(session) != tq_prog:
+            session, _ = quiz_session_params(week)
+    elif tq_prog > 0:
+        session, _ = quiz_session_params(week)
+    else:
+        if ix_key not in st.session_state:
+            st.session_state[ix_key] = draw_quiz_pool_indices(
+                len(pool), want, random.Random()
+            )
+        indices = parse_quiz_pool_indices_saved(st.session_state.get(ix_key), len(pool))
+        need_len = min(want, len(pool)) if pool else 0
+        if need_len > 0 and (not indices or len(indices) != need_len):
+            st.session_state[ix_key] = draw_quiz_pool_indices(
+                len(pool), want, random.Random()
+            )
+            indices = parse_quiz_pool_indices_saved(st.session_state[ix_key], len(pool))
+        session = [pool[i] for i in indices]
+
+    pass_min = quiz_pass_min_for_session(week, len(session))
+
     if not session:
         st.error("풀 수 있는 문항이 없습니다. 교사에게 문의하세요.")
         if st.button("주차 목록으로", key=f"stu_quiz_empty_{wid}"):
             _back_to_week_list()
         return
-
-    prog = get_student_lesson_progress_fields(uid, org_id, category_id, wid)
-    pct = int(prog.get("progress_percent") or 0)
     unlocked = (qmode == "open_anytime") or (qmode == "after_video" and pct >= 100)
     if not unlocked:
         st.warning("이 퀴즈는 **영상 시청 진행률 100%** 이후에 응시할 수 있습니다.")
@@ -972,7 +1011,7 @@ def _render_quiz_exam_fullpage(
             _back_to_week_list()
         return
 
-    tq = int(prog.get("quiz_total") or 0)
+    tq = tq_prog
     if step_key not in st.session_state:
         st.session_state[step_key] = "result" if tq > 0 else "solve"
     step = str(st.session_state.get(step_key) or "solve")
@@ -1037,6 +1076,7 @@ def _render_quiz_exam_fullpage(
                 st.session_state.pop(f"stu_quiz_started_{wid}", None)
                 st.session_state.pop(f"stu_quiz_buf_{wid}", None)
                 st.session_state.pop(f"stu_quiz_buf_sync_{wid}", None)
+                st.session_state.pop(ix_key, None)
                 st.session_state[active_key] = 0
                 st.session_state[step_key] = "solve"
                 st.rerun()
@@ -1176,6 +1216,14 @@ def _render_quiz_exam_fullpage(
             ]
             passed_sub = correct >= pass_min
             st.session_state[f"stu_quiz_last_ans_{wid}"] = list(answers)
+            raw_pool_ix = st.session_state.get(ix_key)
+            qpi: list[int] = []
+            if isinstance(raw_pool_ix, list):
+                for x in raw_pool_ix:
+                    try:
+                        qpi.append(int(x))
+                    except (TypeError, ValueError):
+                        pass
             merge_student_lesson_quiz_result(
                 uid,
                 org_id,
@@ -1185,6 +1233,7 @@ def _render_quiz_exam_fullpage(
                 quiz_total=len(session),
                 quiz_passed=passed_sub,
                 quiz_wrong_indices=wrong_indices,
+                quiz_pool_indices=qpi if qpi else None,
             )
             st.session_state[step_key] = "result"
             try:
@@ -1252,8 +1301,9 @@ def _render_week_list(
                     st.caption("키워드: 등록된 키워드가 없습니다.")
                 qmode = str(w.get("quiz_mode") or "off")
                 qsrc = str(w.get("quiz_source") or "manual")
-                sess_preview, pass_need = quiz_session_params(w) if qmode != "off" else ([], 0)
-                n_sess = len(sess_preview)
+                n_sess, pass_need = (
+                    quiz_preview_session_pair(w) if qmode != "off" else (0, 0)
+                )
                 if qmode == "off":
                     st.caption("퀴즈: 없음")
                 elif n_sess == 0:
@@ -1429,7 +1479,7 @@ def _render_learn_right_sidebar(
     # AI 채팅
     st.caption("이번 주차 학습 목표·요약을 바탕으로 질문할 수 있습니다.")
     if not gemini_client.get_api_key():
-        st.warning("**GEMINI_API_KEY** 가 설정되지 않아 AI 답변을 쓸 수 없습니다.")
+        ui_messages.warn_gemini_key_missing()
         _render_scrollable_chat_html([], height_px=220)
         st.divider()
         st.caption("채팅 입력칸")
@@ -1467,6 +1517,12 @@ def _render_learn_right_sidebar(
                     learning_goals=goals,
                     summary=preview,
                     keywords=keywords,
+                    usage={
+                        "org_id": org_id,
+                        "category_id": category_id,
+                        "bucket": "student_chat",
+                        "usage_kind": "student_week_ai_chat",
+                    },
                 )
                 hist.append({"role": "assistant", "content": ans})
                 if uid:

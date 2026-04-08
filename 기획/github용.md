@@ -1,98 +1,85 @@
-# GitHub 업로드·정리 가이드
+# EduChain AI — GitHub 반영용 변경 요약
 
-이 문서는 **KIT_Contest** 저장소를 GitHub에 올리기 전에 확인할 항목과, 초기 푸시까지의 절차를 정리한 것입니다.  
-앱 실행·키 설정의 세부는 `EduChain_AI/README.md`, `기획/연동필요.md`를 참고합니다.
+커밋 메시지·PR 본문에 붙여 쓸 수 있도록 **최근 작업(AI 토큰 활용량·미터링)** 을 요약했습니다.
 
 ---
 
-## 1. 저장소 구조 (업로드 단위)
+## 한 줄 요약
 
-| 경로 | 설명 |
+Gemini 호출마다 **입·출력 토큰**을 Firestore에 누적하고, **교사·운영** 화면에서 **용도·세부 기능·사용자별**로 확인·검색할 수 있는 **「AI 토큰 활용량」** 기능을 추가했다.
+
+---
+
+## 배경
+
+- 교육 SaaS에서 **AI 변동비**를 설명·관리하려면 “누가·어떤 기능에·얼마나” 썼는지가 필요하다.
+- 기존에는 집계 없이 Gemini만 호출했으므로, **관측 가능한 미터링** 단계를 코드에 반영했다.
+
+---
+
+## 주요 변경 사항
+
+### 1. Firestore
+
+| 경로 | 역할 |
 |------|------|
-| `EduChain_AI/` | Streamlit 앱 본체 (`Home.py`, `pages/`, `services/` 등) |
-| `기획/` | 기획·진행 상황·연동 체크리스트 문서 |
-| `정리폴더/` | (선택) 참고 자료·예제 — **용량·저작권** 확인 후 커밋 여부 결정 |
+| `Organizations/{org_id}/AiTokenRollup/{category_id \| __org__}` | 버킷별·세부 기능(`kind_*`) **토큰·호출 수 누적** |
+| `Organizations/{org_id}/AiTokenEvents/{id}` | 호출 **1건 로그** — `usage_kind`, `bucket`, 토큰, `actor_uid` / 역할 / 표시명, `category_id` |
 
-**한 저장소에 루트·앱·기획을 함께 두는 경우**가 기본이며, GitHub에는 **비밀 값이 포함된 파일이 없는지**가 가장 중요합니다.
+### 2. 백엔드
+
+- **`services/gemini_client.py`**: `_generate` 성공 시 응답 `usage_metadata`에서 토큰 추출 후 누적·이벤트 기록. 각 공개 함수에 `usage` dict (`org_id`, `category_id`, `bucket`, `usage_kind`) 전달.
+- **`services/firestore_repo.py`**: `increment_ai_token_rollup`, `append_ai_token_event`, 집계·이벤트 목록 조회 등.
+- **호출부 연동**: `lesson_mgmt_ui`, `student_portal`, `student_quiz_mix`, `course_stats_ui`, `3_Teacher` 등에서 `usage`·`usage_kind` 지정.
+
+### 3. UI
+
+- **교사** (`pages/3_Teacher.py`): 사이드바 **「AI 토큰 활용량」** — 선택 수업만, 용도/세부 기능/사용자별/최근 호출, **사용자 검색**.
+- **운영** (`pages/2_관리.py` + `sidebar_helpers`): 기업 상세 **「AI 토큰 활용량」** 탭 — 기업 전체·수업별·사용자별·최근 호출, 동일 검색.
+- **`services/ai_usage_ui.py`**: 표·차트·검색·필터. 차트는 **matplotlib 가로 막대**(한글 라벨 가독성); `matplotlib` 미설치 시 **`st.bar_chart` 폴백**.
+- **수업 통계(교사)**: 상세 AI 토큰 블록은 제거하고 **AI 토큰 메뉴** 안내. **운영자·과목 통계** 화면에서는 기존처럼 상단에 AI 요약 유지.
+
+### 4. 의존성
+
+- **`requirements.txt`**: `matplotlib>=3.8.0` 추가.
+- 배포/로컬: 가상환경에서 `pip install -r requirements.txt` 실행.
 
 ---
 
-## 2. 올리기 전 필수 체크리스트
+## 관련 파일 (참고)
 
-### 2.1 비밀·로컬 전용 파일 (커밋 금지)
-
-다음이 **추적되지 않거나**, 이미 커밋돼 있다면 `git rm --cached`로 제거 후 키를 **재발급**하세요.
-
-- [ ] `EduChain_AI/.streamlit/secrets.toml`
-- [ ] Firebase **서비스 계정 JSON** (`*firebase-adminsdk*.json`, `firebase-service-account.json` 등)
-- [ ] `credentials.json`, `client_secret*.json`, `token.json` (OAuth·GCP)
-- [ ] `EduChain_AI/web/firebase-config.js` (예시는 `firebase-config.example.js`만 커밋)
-- [ ] `.env`, `.env.local`
-
-제외 규칙은 **`EduChain_AI/.gitignore`** 및 저장소 루트 **`KIT_Contest/.gitignore`**에 정의되어 있습니다.
-
-### 2.2 추적 해제 예시 (이미 커밋된 경우)
-
-PowerShell, 저장소 루트(`KIT_Contest`)에서:
-
-```powershell
-git rm --cached EduChain_AI/.streamlit/secrets.toml
-git rm --cached -- EduChain_AI/*firebase-adminsdk*.json
+```
+EduChain_AI/services/gemini_client.py
+EduChain_AI/services/firestore_repo.py
+EduChain_AI/services/ai_usage_ui.py
+EduChain_AI/services/lesson_mgmt_ui.py
+EduChain_AI/services/student_portal.py
+EduChain_AI/services/student_quiz_mix.py
+EduChain_AI/services/course_stats_ui.py
+EduChain_AI/services/sidebar_helpers.py
+EduChain_AI/pages/3_Teacher.py
+EduChain_AI/pages/2_관리.py
+EduChain_AI/requirements.txt
+기획/EduChain_AI_전체정리.md
+기획/진행중상황.md
 ```
 
-경로는 실제 파일명에 맞게 조정합니다. 이후 `.gitignore`가 해당 파일을 가리키는지 확인하고 커밋합니다.
-
-### 2.3 커밋해도 되는 것
-
-- [ ] `EduChain_AI/.streamlit/secrets.toml.example` (키 없는 템플릿)
-- [ ] `EduChain_AI/.streamlit/config.toml` (테마 등 비밀 아님)
-- [ ] `EduChain_AI/firebase/firestore.rules` (규칙 초안 — 콘솔에 배포용)
-- [ ] `EduChain_AI/firebase.json`, `.firebaserc` (프로젝트 연결 정보 — 민감하면 팀 정책에 따름)
-
 ---
 
-## 3. Git 초기화·원격·첫 푸시 (요약)
+## 커밋 메시지 예시
 
-로컬에 Git이 없다면 저장소 **루트**에서:
+```
+feat(ai): Gemini 토큰 누적·이벤트 로그 및 AI 토큰 활용량 UI(교사/운영)
 
-```powershell
-cd C:\project\KIT_Contest
-git init
-git add .
-git status
+- Firestore AiTokenRollup / AiTokenEvents
+- usage_kind·actor 세션 기록, 사용자 검색·가로 막대 차트
+- matplotlib 의존성 및 미설치 시 bar_chart 폴백
 ```
 
-`git status`에 **secrets·JSON 키**가 보이면 안 됩니다. 보이면 `.gitignore`를 고치거나 `git reset`으로 스테이징을 취소합니다.
-
-```powershell
-git commit -m "Initial commit: EduChain AI 및 기획 문서"
-git branch -M main
-git remote add origin https://github.com/<사용자명>/<저장소명>.git
-git push -u origin main
-```
-
-GitHub에서 저장소를 **먼저 빈 저장소로 만들고**, 위 `remote`·`push`를 사용합니다. SSH를 쓰는 경우 `git@github.com:...` 형식으로 `remote add` 합니다.
-
 ---
 
-## 4. 이후 협업·배포 시 참고
+## 제한·메모
 
-- **Streamlit Cloud**: GitHub 연동 시 Secrets에 `GEMINI_API_KEY`, Firebase 관련 키 등을 등록 — `기획/연동필요.md` §4·§4.1
-- **Firestore 규칙**: `firebase/firestore.rules`를 Firebase 콘솔에 **배포**해야 클라이언트 SDK 접근에 반영됩니다.
-- **문서 동기화**: 구현이 바뀌면 `기획/진행중상황.md`, 필요 시 `EduChain_AI/README.md`를 함께 갱신하는 것을 권장합니다.
-
----
-
-## 5. 관련 파일
-
-| 파일 | 용도 |
-|------|------|
-| `EduChain_AI/.gitignore` | 앱 폴더 기준 제외 목록 |
-| `KIT_Contest/.gitignore` (루트) | 전체 저장소 공통 제외 |
-| `기획/연동필요.md` | API 키·Firebase·Streamlit Secrets |
-| `기획/진행중상황.md` | 기능 진행·다음 작업 |
-| `기획/EduChain_AI_전체정리.md` | 프로젝트 개요·데이터 모델 |
-
----
-
-*마지막으로 `git status`와 GitHub 웹의 **Files changed**에서 한 번 더 비밀 파일이 없는지 확인한 뒤 푸시하세요.*
+- **과금·청구**와 직접 연동하지 않음 — **관측·운영 투명성** 목적.
+- 구버전 호출·actor 미기록 이벤트는 “미기록”으로 표시될 수 있음.
+- 이벤트 목록은 **최근 N건** 범위에서 사용자별 합산(문서에 명시된 상한 참고).

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import streamlit as st
 
+from . import ui_messages
 from .session_keys import (
     AUTH_ORG_ID,
     AUTH_ROLE,
@@ -11,6 +12,7 @@ from .session_keys import (
     MGMT_DETAIL_TAB,
     STUDENT_COURSE_SUB_TAB,
     STUDENT_LEARN_WEEK_ID,
+    STUDENT_QUIZ_MIX_PHASE,
     STUDENT_SELECTED_CATEGORY_ID,
     STUDENT_VIEW_TAB,
     TEACHER_SELECTED_CATEGORY_ID,
@@ -104,8 +106,9 @@ _LABELS = {
     "plan": "플랜·슬롯",
     "people": "교사·학생",
     "content": "콘텐츠·통계",
+    "ai_usage": "AI 토큰 활용량",
 }
-_ORDER = ["basic", "plan", "people", "content"]
+_ORDER = ["basic", "plan", "people", "content", "ai_usage"]
 
 # 세부 설정 카테고리 — 멀티페이지 네비(Home·관리 링크)와 비슷한 링크 톤 (로그아웃 제외)
 _MGMT_NAV_STYLE = """
@@ -223,7 +226,7 @@ def render_teacher_sidebar() -> None:
     st.sidebar.markdown("**교사 메뉴**")
 
     if not uid or not org_id:
-        st.sidebar.info("소속 기업 정보가 없습니다. 운영자에게 배정을 요청하세요.")
+        ui_messages.sidebar_info_org_missing()
         return
 
     cats = list_content_categories_for_teacher(org_id, str(uid))
@@ -236,7 +239,7 @@ def render_teacher_sidebar() -> None:
 
     st.session_state.setdefault(TEACHER_VIEW_TAB, "overview")
     view = str(st.session_state.get(TEACHER_VIEW_TAB) or "overview")
-    if view not in ("overview", "students", "course_stats", "lesson_mgmt"):
+    if view not in ("overview", "students", "course_stats", "ai_usage", "lesson_mgmt"):
         view = "overview"
         st.session_state[TEACHER_VIEW_TAB] = view
 
@@ -251,9 +254,7 @@ def render_teacher_sidebar() -> None:
 
     if not cats:
         st.sidebar.caption("수업 선택")
-        st.sidebar.info(
-            "배정된 수업 영역이 없습니다. 운영자에게 **관리 → 콘텐츠**에서 배정을 요청하세요."
-        )
+        ui_messages.sidebar_info_teacher_no_categories()
         st.session_state.pop(TEACHER_SELECTED_CATEGORY_ID, None)
         st.session_state.pop(TEACHER_SELECTED_SUB_ITEM_ID, None)
         return
@@ -314,6 +315,15 @@ def render_teacher_sidebar() -> None:
         st.switch_page("pages/3_Teacher.py")
 
     if st.sidebar.button(
+        "AI 토큰 활용량",
+        key="t_nav_ai_usage",
+        type="primary" if view == "ai_usage" else "secondary",
+        use_container_width=True,
+    ):
+        st.session_state[TEACHER_VIEW_TAB] = "ai_usage"
+        st.switch_page("pages/3_Teacher.py")
+
+    if st.sidebar.button(
         "수업 관리",
         key="t_nav_lesson",
         type="primary" if view == "lesson_mgmt" else "secondary",
@@ -333,8 +343,9 @@ render_teacher_sidebar_categories = render_teacher_sidebar
 
 
 def render_student_sidebar() -> None:
-    """학생: 교사 메뉴와 같은 톤 — 개요 / 수업 선택(selectbox) / 수업 개요·수업 수강."""
+    """학생: 교사 메뉴와 같은 톤 — 개요 / 수업 선택(selectbox) / 수업 개요·수업 수강·통합 퀴즈."""
     from .firestore_repo import list_content_categories_for_student
+    from .student_quiz_mix import clear_quiz_mix_state_for_nav
 
     if st.session_state.get(AUTH_ROLE) != "Student":
         return
@@ -353,7 +364,7 @@ def render_student_sidebar() -> None:
     st.sidebar.markdown("**학생 메뉴**")
 
     if not uid or not org_id:
-        st.sidebar.info("소속 기업 정보가 없습니다. 운영자에게 문의하세요.")
+        ui_messages.sidebar_info_org_missing()
         return
 
     cats = list_content_categories_for_student(org_id, str(uid))
@@ -365,7 +376,7 @@ def render_student_sidebar() -> None:
     }
 
     view = str(st.session_state.get(STUDENT_VIEW_TAB) or "overview")
-    if view not in ("overview", "course"):
+    if view not in ("overview", "course", "quiz_mix"):
         view = "overview"
         st.session_state[STUDENT_VIEW_TAB] = view
 
@@ -380,13 +391,14 @@ def render_student_sidebar() -> None:
         type="primary" if view == "overview" else "secondary",
         use_container_width=True,
     ):
+        clear_quiz_mix_state_for_nav(st.session_state.get(STUDENT_SELECTED_CATEGORY_ID))
         st.session_state[STUDENT_VIEW_TAB] = "overview"
         st.session_state.pop(STUDENT_LEARN_WEEK_ID, None)
         st.switch_page("pages/5_Student.py")
 
     if not cats:
         st.sidebar.caption("수업 선택")
-        st.sidebar.info("배정된 수업이 없습니다.")
+        ui_messages.sidebar_info_student_no_categories()
         st.session_state.pop(STUDENT_SELECTED_CATEGORY_ID, None)
         return
 
@@ -409,6 +421,7 @@ def render_student_sidebar() -> None:
         type="primary" if view == "course" and sub == "overview" else "secondary",
         use_container_width=True,
     ):
+        clear_quiz_mix_state_for_nav(st.session_state.get(STUDENT_SELECTED_CATEGORY_ID))
         st.session_state[STUDENT_VIEW_TAB] = "course"
         st.session_state[STUDENT_COURSE_SUB_TAB] = "overview"
         st.session_state.pop(STUDENT_LEARN_WEEK_ID, None)
@@ -420,10 +433,21 @@ def render_student_sidebar() -> None:
         type="primary" if view == "course" and sub == "learn" else "secondary",
         use_container_width=True,
     ):
+        clear_quiz_mix_state_for_nav(st.session_state.get(STUDENT_SELECTED_CATEGORY_ID))
         st.session_state[STUDENT_VIEW_TAB] = "course"
         st.session_state[STUDENT_COURSE_SUB_TAB] = "learn"
         # 플레이어에 들어가 있던 주차 ID가 남으면 주차 목록 대신 바로 강의로 진입함 → 항상 목록부터
         st.session_state.pop(STUDENT_LEARN_WEEK_ID, None)
+        st.switch_page("pages/5_Student.py")
+
+    if st.sidebar.button(
+        "통합 퀴즈",
+        key="st_nav_quiz_mix",
+        type="primary" if view == "quiz_mix" else "secondary",
+        use_container_width=True,
+    ):
+        st.session_state[STUDENT_VIEW_TAB] = "quiz_mix"
+        st.session_state[STUDENT_QUIZ_MIX_PHASE] = "setup"
         st.switch_page("pages/5_Student.py")
 
     cur = next(

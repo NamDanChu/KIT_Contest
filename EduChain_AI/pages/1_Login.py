@@ -109,27 +109,51 @@ if view == "login":
 elif view == "signup":
     st.title("회원가입")
     st.caption(
-        "서비스에 **첫 번째로** 가입하면 **운영자(Operator)** 로 등록되며, "
-        "입력한 기업이 첫 조직으로 생성됩니다. 이후 가입자는 일반 **학생** 역할로 시작합니다."
+        "**역할**을 고른 뒤 이메일로 가입합니다. "
+        "**운영자**는 로그인 후 **관리** 메뉴에서 학원·학교(기업)를 만들 수 있습니다. "
+        "**유저**는 가입 직후 **Home**에서 운영자가 알려 준 **초대 코드**를 넣어 소속됩니다."
     )
 
     with st.form("form_signup", clear_on_submit=False):
         st.text_input("이름", key="signup_display_name", autocomplete="name")
-        st.text_input("학원 또는 학교(기업) 이름", key="signup_org_name")
+        st.radio(
+            "가입 유형",
+            ["user", "operator"],
+            format_func=lambda x: (
+                "유저 — Home에서 초대 코드로 교사 또는 학생으로 소속됩니다"
+                if x == "user"
+                else "운영자 — 관리 메뉴에서 기업(학원)을 만들고 관리합니다"
+            ),
+            key="signup_role_choice",
+            horizontal=False,
+        )
         st.text_input("이메일", key="signup_email", autocomplete="email")
-        st.text_input("비밀번호", type="password", key="signup_password")
+        st.text_input("비밀번호", type="password", key="signup_password", autocomplete="new-password")
+        st.text_input(
+            "비밀번호 확인",
+            type="password",
+            key="signup_password_confirm",
+            autocomplete="new-password",
+        )
         submitted = st.form_submit_button("회원가입", type="primary", use_container_width=True)
 
     email_val = (st.session_state.get("signup_email") or "").strip()
     pw_val = st.session_state.get("signup_password") or ""
+    pw2_val = st.session_state.get("signup_password_confirm") or ""
     name_val = (st.session_state.get("signup_display_name") or "").strip()
-    org_val = (st.session_state.get("signup_org_name") or "").strip()
+    role_choice = str(st.session_state.get("signup_role_choice") or "user")
 
     if submitted:
         if not email_val or not pw_val:
             st.error("이메일과 비밀번호를 모두 입력하세요.")
-        elif not name_val or not org_val:
-            st.error("이름과 학원·학교(기업) 이름을 모두 입력하세요.")
+        elif pw_val != pw2_val:
+            st.error("비밀번호와 비밀번호 확인이 일치하지 않습니다.")
+        elif len(pw_val) < 6:
+            st.error("비밀번호는 6자 이상이어야 합니다.")
+        elif not name_val:
+            st.error("이름을 입력하세요.")
+        elif role_choice not in ("operator", "user"):
+            st.error("가입 유형을 선택하세요.")
         else:
             try:
                 data = sign_up_email(email_val, pw_val)
@@ -137,7 +161,7 @@ elif view == "signup":
                     data,
                     signup_profile={
                         "display_name": name_val,
-                        "org_name": org_val,
+                        "signup_choice": role_choice,
                     },
                 )
                 st.success("회원가입이 완료되었습니다.")
@@ -154,24 +178,33 @@ elif view == "invite_signup":
     st.title("초대 코드로 가입")
     st.caption(
         "운영자에게 받은 **교사용** 또는 **학생용** 초대 코드를 입력한 뒤, "
-        "닉네임·이메일·비밀번호를 설정합니다. 닉네임은 기업에서 구분용으로 표시됩니다. "
+        "닉네임·이메일·비밀번호를 설정합니다. 가입 후 **운영자 승인**이 있어야 교사/학생 메뉴를 쓸 수 있습니다. "
         "**`…/Login?invite=코드`** 링크로 들어오면 코드가 자동으로 채워집니다."
     )
     with st.form("form_invite_signup", clear_on_submit=False):
         st.text_input("초대 코드", key="invite_code_input", placeholder="예: ABC12XY3")
         st.text_input("닉네임(표시 이름)", key="invite_nickname", autocomplete="nickname")
         st.text_input("이메일", key="invite_email", autocomplete="email")
-        st.text_input("비밀번호", type="password", key="invite_password")
+        st.text_input("비밀번호", type="password", key="invite_password", autocomplete="new-password")
+        st.text_input(
+            "비밀번호 확인",
+            type="password",
+            key="invite_password_confirm",
+            autocomplete="new-password",
+        )
         inv_sub = st.form_submit_button("가입 완료", type="primary", use_container_width=True)
 
     code_raw = (st.session_state.get("invite_code_input") or "").strip()
     nick = (st.session_state.get("invite_nickname") or "").strip()
     em = (st.session_state.get("invite_email") or "").strip()
     pw = st.session_state.get("invite_password") or ""
+    pw_inv2 = st.session_state.get("invite_password_confirm") or ""
 
     if inv_sub:
         if not code_raw or not nick or not em or not pw:
             st.error("초대 코드, 닉네임, 이메일, 비밀번호를 모두 입력하세요.")
+        elif pw != pw_inv2:
+            st.error("비밀번호와 비밀번호 확인이 일치하지 않습니다.")
         elif len(pw) < 6:
             st.error("비밀번호는 6자 이상이어야 합니다.")
         else:
@@ -190,7 +223,10 @@ elif view == "invite_signup":
                             "display_name": nick,
                         },
                     )
-                    st.success("가입이 완료되었습니다. 로그인되었습니다.")
+                    st.success(
+                        "가입이 완료되었습니다. **Home**에서 승인 여부를 확인하세요. "
+                        "(운영자가 관리 화면에서 승인하면 교사/학생 메뉴가 열립니다.)"
+                    )
                     st.rerun()
                 except Exception as e:
                     st.error(str(e))

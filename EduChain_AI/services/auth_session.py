@@ -11,10 +11,11 @@ from .firebase_app import init_firebase
 from .firestore_repo import (
     count_all_users,
     count_students_in_org,
-    create_organization,
+    find_org_and_role_by_invite_code,
     get_organization,
     get_user,
     get_user_role,
+    submit_org_join_request,
     upsert_user,
 )
 from .session_keys import (
@@ -115,51 +116,123 @@ def apply_firebase_rest_result(
                 raise RuntimeError(
                     "학생 슬롯이 가득 찼습니다. 운영자에게 문의하세요."
                 )
-        upsert_user(uid, email, inv_role, inv_org, display_name=display_name)
-        st.session_state[AUTH_ROLE] = inv_role
-        st.session_state[AUTH_ORG_ID] = inv_org
+        upsert_user(uid, email, "User", None, display_name=display_name)
+        submit_org_join_request(
+            uid, email, display_name, inv_org, inv_role
+        )
+        st.session_state[AUTH_ROLE] = "User"
+        st.session_state[AUTH_ORG_ID] = ""
         st.session_state[AUTH_DISPLAY_NAME] = display_name
-        st.session_state[AUTH_ORG_NAME] = str(org.get("org_name") or "")
+        st.session_state[AUTH_ORG_NAME] = ""
         st.session_state.pop("oauth_url", None)
         return
 
-    # 신규 사용자 — 일반(운영자 첫 가입·이후 학생 등)
-    prior_count = count_all_users()
-    display_name = ""
-    org_name_for_create = ""
-
-    if signup_profile:
-        display_name = (signup_profile.get("display_name") or "").strip() or email.split("@")[0]
-        org_name_for_create = (signup_profile.get("org_name") or "").strip() or "이름 없는 기업"
-    else:
-        # Google 등 — 폼 없이 가입 (첫 사용자도 기업 자동 생성하지 않음)
-        display_name = email.split("@")[0] if email else "사용자"
-
-    if prior_count == 0:
-        role = "Operator"
-        if signup_profile:
-            # 이메일 회원가입: 입력한 기업명으로 1건 생성
-            org_id = create_organization(
-                org_name=org_name_for_create,
-                owner_uid=uid,
-                plan="Starter",
-            )
-            upsert_user(uid, email, role, org_id, display_name=display_name)
+    # 신규 사용자 — 이메일 회원가입: 운영자 / 유저 선택 (기업명 없이)
+    if signup_profile and signup_profile.get("signup_choice") in ("operator", "user"):
+        display_name = (signup_profile.get("display_name") or "").strip() or (
+            email.split("@")[0] if email else "사용자"
+        )
+        choice = str(signup_profile.get("signup_choice"))
+        if choice == "operator":
+            upsert_user(uid, email, "Operator", None, display_name=display_name)
+            st.session_state[AUTH_ROLE] = "Operator"
         else:
-            # Google 첫 가입: 운영자만 두고 기업은 관리 화면에서 추가
-            upsert_user(uid, email, role, None, display_name=display_name)
-            org_id = ""
-    else:
-        role = "Student"
-        org_id = _default_org_id()
-        upsert_user(uid, email, role, org_id, display_name=display_name)
+            upsert_user(uid, email, "User", None, display_name=display_name)
+            st.session_state[AUTH_ROLE] = "User"
+        st.session_state[AUTH_ORG_ID] = ""
+        st.session_state[AUTH_DISPLAY_NAME] = display_name
+        st.session_state[AUTH_ORG_NAME] = ""
+        st.session_state.pop("oauth_url", None)
+        return
 
-    st.session_state[AUTH_ROLE] = role
-    st.session_state[AUTH_ORG_ID] = org_id if org_id else ""
-    st.session_state[AUTH_DISPLAY_NAME] = display_name
-    org = get_organization(org_id) if org_id else None
-    st.session_state[AUTH_ORG_NAME] = str(org.get("org_name")) if org else ""
+    # 신규 사용자 — Google 등 OAuth(signup_profile 없음): 첫 계정은 운영자, 이후는 기본 기업 학생
+    prior_count = count_all_users()
+    if prior_count == 0:
+        display_name = email.split("@")[0] if email else "사용자"
+        upsert_user(uid, email, "Operator", None, display_name=display_name)
+        st.session_state[AUTH_ROLE] = "Operator"
+        st.session_state[AUTH_ORG_ID] = ""
+        st.session_state[AUTH_DISPLAY_NAME] = display_name
+        st.session_state[AUTH_ORG_NAME] = ""
+    else:
+        display_name = email.split("@")[0] if email else "사용자"
+        org_id = _default_org_id()
+        upsert_user(uid, email, "Student", org_id, display_name=display_name)
+        st.session_state[AUTH_ROLE] = "Student"
+        st.session_state[AUTH_ORG_ID] = org_id
+        st.session_state[AUTH_DISPLAY_NAME] = display_name
+        org = get_organization(org_id) if org_id else None
+        st.session_state[AUTH_ORG_NAME] = str(org.get("org_name")) if org else ""
     st.session_state.pop("oauth_url", None)
+
+
+def join_organization_with_invite_for_user_session() -> None:
+    """Home — 역할이 User 인 계정이 초대 코드로 Teacher/Student 소속을 만든다."""
+    import streamlit as st
+
+    init_firebase()
+    uid = str(st.session_state.get(AUTH_UID) or "").strip()
+    if not uid:
+        raise RuntimeError("로그인이 필요합니다.")
+    prof = get_user(uid)
+    if not prof:
+        raise RuntimeError("프로필을 찾을 수 없습니다. 다시 로그인하세요.")
+    if str(prof.get("role") or "") != "User":
+        raise RuntimeError(
+            "초대 소속은 **유저**로 가입한 계정에서만 사용할 수 있습니다."
+        )
+    code_raw = str(st.session_state.get("home_invite_code_input") or "").strip()
+    code = code_raw.upper().replace(" ", "")
+    if not code:
+        raise RuntimeError("초대 코드를 입력하세요.")
+    resolved = find_org_and_role_by_invite_code(code)
+    if not resolved:
+        raise RuntimeError("유효하지 않은 초대 코드입니다.")
+    org_id, role = resolved
+    if role not in ("Teacher", "Student"):
+        raise RuntimeError("유효하지 않은 초대 역할입니다.")
+    email = str(prof.get("email") or st.session_state.get(AUTH_EMAIL) or "")
+    display_name = str(
+        prof.get("display_name") or st.session_state.get(AUTH_DISPLAY_NAME) or ""
+    ).strip() or (email.split("@")[0] if email else "사용자")
+    org = get_organization(org_id)
+    if not org:
+        raise RuntimeError("기업(조직)을 찾을 수 없습니다.")
+    if role == "Student":
+        max_slots = int(org.get("max_slots") or 0)
+        if count_students_in_org(org_id) >= max_slots:
+            raise RuntimeError("학생 슬롯이 가득 찼습니다. 운영자에게 문의하세요.")
+    upsert_user(uid, email, "User", None, display_name=display_name)
+    submit_org_join_request(uid, email, display_name, org_id, role)
+    st.session_state[AUTH_ROLE] = "User"
+    st.session_state[AUTH_ORG_ID] = ""
+    st.session_state[AUTH_DISPLAY_NAME] = display_name
+    st.session_state[AUTH_ORG_NAME] = ""
+
+
+def refresh_session_from_firestore() -> None:
+    """Firestore Users 프로필을 세션에 반영(운영자 승인 후 역할 갱신 등)."""
+    import streamlit as st
+
+    init_firebase()
+    uid = str(st.session_state.get(AUTH_UID) or "").strip()
+    if not uid:
+        return
+    prof = get_user(uid)
+    if not prof:
+        return
+    email = str(prof.get("email") or st.session_state.get(AUTH_EMAIL) or "")
+    display_name = str(prof.get("display_name") or "").strip() or (
+        email.split("@")[0] if email else ""
+    )
+    role = str(prof.get("role") or get_user_role(uid) or "User")
+    org_id = _session_org_id_from_existing(prof)
+    st.session_state[AUTH_EMAIL] = email
+    st.session_state[AUTH_DISPLAY_NAME] = display_name
+    st.session_state[AUTH_ROLE] = role
+    st.session_state[AUTH_ORG_ID] = org_id
+    org = get_organization(org_id) if org_id else None
+    st.session_state[AUTH_ORG_NAME] = str(org.get("org_name") or "") if org else ""
 
 
 def clear_auth_session() -> None:

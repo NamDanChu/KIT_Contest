@@ -17,6 +17,7 @@ from services.firestore_repo import (
     update_organization,
     update_user_fields,
 )
+from services.ai_usage_ui import render_org_ai_usage_dashboard
 from services.mgmt_content import render_org_content_tab
 from services.mgmt_people import render_org_people_tab
 from services.plan_limits import PLAN_ORDER, max_slots_for_plan, normalize_plan
@@ -495,6 +496,9 @@ if (
 
     elif tab_key == "content":
         render_org_content_tab(sel, org_name)
+
+    elif tab_key == "ai_usage":
+        render_org_ai_usage_dashboard(sel)
 
     else:
         st.subheader("콘텐츠·통계")

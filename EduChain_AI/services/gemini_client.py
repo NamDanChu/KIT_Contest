@@ -10,6 +10,92 @@ from typing import Any
 
 import google.generativeai as genai
 
+
+def _token_counts_from_usage_metadata(resp: Any) -> tuple[int, int]:
+    """Gemini 응답의 usage_metadata에서 입력·출력 토큰 수를 꺼낸다."""
+    try:
+        um = getattr(resp, "usage_metadata", None)
+        if um is None:
+            return 0, 0
+        pt = int(getattr(um, "prompt_token_count", None) or 0)
+        ct = int(getattr(um, "candidates_token_count", None) or 0)
+        tc = int(getattr(um, "total_token_count", None) or 0)
+        if pt == 0 and ct == 0 and tc > 0:
+            pt = tc // 2
+            ct = tc - pt
+        return max(0, pt), max(0, ct)
+    except Exception:
+        return 0, 0
+
+
+def _session_actor_for_event() -> tuple[str | None, str | None, str | None]:
+    """Streamlit 로그인 사용자(호출 주체) — 이벤트에만 기록."""
+    try:
+        import streamlit as st
+
+        from services.session_keys import AUTH_DISPLAY_NAME, AUTH_ROLE, AUTH_UID
+
+        uid = (st.session_state.get(AUTH_UID) or "").strip() or None
+        role = (st.session_state.get(AUTH_ROLE) or "").strip() or None
+        dn = (st.session_state.get(AUTH_DISPLAY_NAME) or "").strip() or None
+        return uid, role, dn
+    except Exception:
+        return None, None, None
+
+
+def _record_gemini_usage(
+    usage: dict[str, Any] | None,
+    *,
+    model_name: str,
+    prompt_tokens: int,
+    completion_tokens: int,
+) -> None:
+    if not usage:
+        return
+    org_id = str(usage.get("org_id") or "").strip()
+    if not org_id:
+        return
+    raw_cat = usage.get("category_id")
+    cat_s: str | None
+    if raw_cat is None or str(raw_cat).strip() == "":
+        cat_s = None
+    else:
+        cat_s = str(raw_cat).strip()
+    bucket = str(usage.get("bucket") or "teacher_lesson")
+    au = (usage.get("actor_uid") or "").strip() or None
+    ar = (usage.get("actor_role") or "").strip() or None
+    adn = (usage.get("actor_display_name") or "").strip() or None
+    if not au:
+        s_au, s_ar, s_adn = _session_actor_for_event()
+        au, ar, adn = s_au, s_ar, s_adn
+    try:
+        from services.firestore_repo import append_ai_token_event, increment_ai_token_rollup
+
+        ukind = usage.get("usage_kind")
+        increment_ai_token_rollup(
+            org_id,
+            category_id=cat_s,
+            bucket=bucket,
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
+            model=model_name,
+            usage_kind=str(ukind) if ukind is not None else None,
+        )
+        append_ai_token_event(
+            org_id,
+            category_id=cat_s,
+            bucket=bucket,
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
+            model=model_name,
+            usage_kind=str(ukind) if ukind is not None else None,
+            actor_uid=au,
+            actor_role=ar,
+            actor_display_name=adn,
+        )
+    except Exception:
+        pass
+
 try:
     from google.api_core import exceptions as google_exceptions
 except ImportError:
@@ -140,7 +226,7 @@ def format_quota_error_message(
     return "\n".join(parts)
 
 
-def _generate(prompt: str) -> str:
+def _generate(prompt: str, *, usage: dict[str, Any] | None = None) -> str:
     key = get_api_key()
     if not key:
         raise RuntimeError(
@@ -168,6 +254,13 @@ def _generate(prompt: str) -> str:
                     raise RuntimeError(
                         "Gemini 응답이 비었거나 차단되었습니다. 프롬프트를 줄이거나 재시도하세요."
                     )
+                pt, ct = _token_counts_from_usage_metadata(resp)
+                _record_gemini_usage(
+                    usage,
+                    model_name=model_name,
+                    prompt_tokens=pt,
+                    completion_tokens=ct,
+                )
                 return out
             except Exception as e:
                 last = e
@@ -193,6 +286,7 @@ def summarize_lesson_context(
     learning_goals: str,
     source_text: str,
     meta_hint: str,
+    usage: dict[str, Any] | None = None,
 ) -> str:
     """이번 주차 핵심 요약 (RAG 미리보기용)."""
     prompt = f"""당신은 교육용 AI 어시스턴트입니다. 아래는 한 수업 주차의 학습 목표와 교안/자막 일부입니다.
@@ -212,7 +306,7 @@ def summarize_lesson_context(
 2. 학생이 꼭 알아야 할 용어를 bullet로 나열하라.
 3. 마크다운으로 작성하라.
 """
-    return _generate(prompt)
+    return _generate(prompt, usage=usage)
 
 
 def _strip_json_fence(text: str) -> str:
@@ -244,6 +338,7 @@ def summarize_lesson_with_keywords_one_shot(
     source_text: str,
     meta_hint: str,
     max_terms: int = 12,
+    usage: dict[str, Any] | None = None,
 ) -> tuple[str, str]:
     """
     요약 + 키워드를 **한 번의 generate_content** 로 받는다 (무료 티어 호출 수 절반).
@@ -269,7 +364,7 @@ def summarize_lesson_with_keywords_one_shot(
 예시 형태:
 {{"summary_markdown": "# ...", "keywords_csv": "용어1, 용어2"}}
 """
-    raw = _generate(prompt)
+    raw = _generate(prompt, usage=usage)
     summary, kw = _parse_summary_keywords_payload(raw)
     if not summary:
         raise RuntimeError("Gemini가 요약 JSON을 반환하지 않았습니다. 다시 시도하세요.")
@@ -282,6 +377,7 @@ def extract_keywords_line(
     learning_goals: str,
     source_text: str,
     max_terms: int = 12,
+    usage: dict[str, Any] | None = None,
 ) -> str:
     """쉼표로 구분된 키워드 한 줄."""
     prompt = f"""학습 목표와 교안에서 시험·질문에 쓰기 좋은 핵심 용어만 뽑아라.
@@ -293,7 +389,7 @@ def extract_keywords_line(
 {source_text[:8000]}
 
 출력: 한국어 핵심 용어만 쉼표로 {max_terms}개 이내, 다른 설명 없이."""
-    return _generate(prompt)
+    return _generate(prompt, usage=usage)
 
 
 def generate_quiz_markdown(
@@ -303,6 +399,7 @@ def generate_quiz_markdown(
     source_text: str,
     num_questions: int = 5,
     difficulty: str = "중",
+    usage: dict[str, Any] | None = None,
 ) -> str:
     """객관식 퀴즈 마크다운."""
     prompt = f"""다음 자료를 바탕으로 객관식 {num_questions}문항을 만든다. 난이도: {difficulty}.
@@ -318,7 +415,7 @@ def generate_quiz_markdown(
 - 각 문항에 4지선다, 정답 번호, 짧은 해설을 포함한다.
 - 마크다운으로 번호 목록 형식으로 출력한다.
 """
-    return _generate(prompt)
+    return _generate(prompt, usage=usage)
 
 
 def generate_quiz_items_json(
@@ -326,8 +423,9 @@ def generate_quiz_items_json(
     title: str,
     learning_goals: str,
     source_text: str,
-    num_questions: int = 5,
+    num_questions: int = 50,
     difficulty: str = "중",
+    usage: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     """
     학생 화면 채점용 4지선다 문항 배열.
@@ -356,7 +454,7 @@ def generate_quiz_items_json(
 예시 (형식만 참고):
 [{{"text":"...","options":["가","나","다","라"],"correct":0,"explanation":"근거 문장에 따르면 ..."}}]
 """
-    raw = _generate(prompt)
+    raw = _generate(prompt, usage=usage)
     t = _strip_json_fence(raw)
     try:
         data = json.loads(t)
@@ -374,6 +472,7 @@ def generate_one_page_note(
     title: str,
     learning_goals: str,
     source_text: str,
+    usage: dict[str, Any] | None = None,
 ) -> str:
     """학생 배포용 한 페이지 요약 노트."""
     prompt = f"""학생에게 나눠줄 **한 페이지 분량**의 복습 노트를 작성하라. 친절한 말투.
@@ -386,10 +485,15 @@ def generate_one_page_note(
 {source_text[:12000]}
 
 구성: 핵심 정리 → 용어 정리 → 예시 1개 → 복습 체크 질문 3개. 마크다운."""
-    return _generate(prompt)
+    return _generate(prompt, usage=usage)
 
 
-def answer_with_context(question: str, context: str) -> str:
+def answer_with_context(
+    question: str,
+    context: str,
+    *,
+    usage: dict[str, Any] | None = None,
+) -> str:
     """일반 RAG 답변 (추후 챗봇 연동)."""
     prompt = f"""다음 [참고 자료]만 근거로 [질문]에 답하라. 모르면 모른다고 하라.
 
@@ -399,7 +503,7 @@ def answer_with_context(question: str, context: str) -> str:
 [질문]
 {question}
 """
-    return _generate(prompt)
+    return _generate(prompt, usage=usage)
 
 
 def analyze_course_statistics(
@@ -409,6 +513,7 @@ def analyze_course_statistics(
     weeks_summary_block: str,
     quiz_block: str,
     questions_digest: str,
+    usage: dict[str, Any] | None = None,
 ) -> str:
     """
     교사 수업 통계 화면 — 수강 인원·주차별 완료·질문 요약을 바탕으로 수업 전반을 분석한다.
@@ -436,7 +541,7 @@ def analyze_course_statistics(
 4. **교사에게 제안** — 다음 수업·운영에서 할 수 있는 구체적 행동 3~6개
 5. 데이터가 부족한 부분은 '추후 퀴즈·영상 위치 로그 연동 시 보강 가능' 정도로 짧게 언급할 수 있다.
 """
-    return _generate(prompt)
+    return _generate(prompt, usage=usage)
 
 
 def draft_operator_feedback_to_teacher(
@@ -445,6 +550,7 @@ def draft_operator_feedback_to_teacher(
     n_students: int,
     weeks_summary_block: str,
     questions_digest: str,
+    usage: dict[str, Any] | None = None,
 ) -> str:
     """
     운영자 화면 — 집계 데이터를 바탕으로 담당 교사에게 보낼 피드백 **초안** (편집 가능하도록 마크다운).
@@ -469,7 +575,7 @@ def draft_operator_feedback_to_teacher(
 
 초안:
 """
-    return _generate(prompt)
+    return _generate(prompt, usage=usage)
 
 
 def analyze_student_learning_profile(
@@ -480,6 +586,7 @@ def analyze_student_learning_profile(
     questions_block: str,
     total_questions: int,
     quiz_summary_block: str = "",
+    usage: dict[str, Any] | None = None,
 ) -> str:
     """
     교사 화면 — 한 학생의 주차별 진행·질문 이력과 퀴즈(제출 시 저장된 요약)를 바탕으로 분석한다.
@@ -515,7 +622,59 @@ def analyze_student_learning_profile(
 4. **교사가 도울 수 있는 제안** — 불릿 2~4개 (구체적으로)
 5. 개인을 비하하거나 확정적 진단을 하지 말고, **관찰된 데이터에 기반**해 쓴다.
 """
-    return _generate(prompt)
+    return _generate(prompt, usage=usage)
+
+
+def explain_mixed_quiz_practice(
+    *,
+    course_name: str,
+    question_blocks: str,
+    usage: dict[str, Any] | None = None,
+) -> str:
+    """
+    통합 퀴즈(다회차 합침) 연습 후 — 오답 중심 해설·보완점.
+    ``question_blocks`` 에 문항별 정오답·지문·선택 요약을 넣는다.
+    """
+    prompt = f"""당신은 학습 코치입니다. 아래는 학생이 **여러 주차 범위를 합친 객관식 연습 퀴즈**를 푼 결과입니다.
+
+[수업명] {course_name}
+
+[문항별 결과]
+{question_blocks[:14000]}
+
+요구 (한국어, 마크다운):
+1. **전체 총평** (3~6문장): 잘한 점과 아쉬운 점을 균형 있게.
+2. **오답·헷갈린 문항** — 해당 문항만 짧은 **해설 힌트**와 복습 포인트(번호 매기기).
+3. **보완 제안** — 불릿 3~7개 (다음에 무엇을 보면 좋은지).
+개인 비하·확정 진단 금지. 위 결과 텍스트에만 근거한다.
+"""
+    return _generate(prompt, usage=usage)
+
+
+def infinite_quiz_coach_note(
+    *,
+    course_name: str,
+    stats_block: str,
+    usage: dict[str, Any] | None = None,
+) -> str:
+    """
+    무한 연습 모드 — 주차·문항별 누적 통계를 바탕으로 약점·복습 방향을 짧게 정리한다.
+    """
+    prompt = f"""학생이 **무한 연습**(한 문제씩 풀고 바로 피드백) 모드를 사용 중입니다.
+아래 통계는 **주차(수업 범위) 이름**과 횟수만 담겨 있습니다. (내부 문항 ID·해시·코드는 없음)
+
+[수업명] {course_name}
+
+[통계 요약]
+{stats_block[:8000]}
+
+요구 (한국어, 마크다운, 간결):
+1. **총평** 2~4문장: 데이터에 근거해 어떤 부분을 더 연습하면 좋은지.
+2. **불릿 3~6개** — 구체적 복습 제안(주차명·개념 유형 위주).
+**금지**: `w1:` 같은 내부 식별자, 해시, 문항 ID, 코드 조각을 **절대 쓰지 마세요**. 학생이 이해할 수 있는 **주차 제목·개념 이름**만 사용하세요.
+진단 단정·개인 비하 금지. 데이터가 적으면 '아직 표본이 적다'고 짧게 말해도 된다.
+"""
+    return _generate(prompt, usage=usage)
 
 
 def answer_student_lesson_question(
@@ -525,6 +684,7 @@ def answer_student_lesson_question(
     learning_goals: str,
     summary: str,
     keywords: str,
+    usage: dict[str, Any] | None = None,
 ) -> str:
     """학생 수강 화면 — 주차 맥락만으로 질문에 답한다."""
     prompt = f"""당신은 교육용 AI 튜터입니다. 아래 [수업 맥락]에 근거해 학생 질문에만 답하세요.
@@ -545,4 +705,4 @@ def answer_student_lesson_question(
 {question.strip()}
 
 답변 요구: 한국어, 마크다운 사용 가능, 2~12문장 내로 간결하게."""
-    return _generate(prompt)
+    return _generate(prompt, usage=usage)

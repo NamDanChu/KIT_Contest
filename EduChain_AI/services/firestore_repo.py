@@ -20,6 +20,8 @@ from .plan_limits import max_slots_for_plan
 COL_ORGS = "Organizations"
 COL_USERS = "Users"
 COL_CHAT = "ChatLogs"
+# Organizations/{org_id}/JoinRequests/{uid} — 초대 코드 소속 **승인 대기** (운영자 승인 후 Users 반영)
+SUB_ORG_JOIN_REQUESTS = "JoinRequests"
 # Organizations/{org_id}/ContentCategories/{category_id}
 SUB_CONTENT_CATEGORIES = "ContentCategories"
 # .../ContentCategories/{category_id}/LessonWeeks/{week_doc_id}
@@ -28,6 +30,40 @@ SUB_LESSON_WEEKS = "LessonWeeks"
 SUB_LESSON_PROGRESS = "LessonProgress"
 # Organizations/{org_id}/ContentCategories/{cat_id}/StudentLessonQuestions/{doc_id}
 SUB_STUDENT_LESSON_QUESTIONS = "StudentLessonQuestions"
+# .../ContentCategories/{cat_id}/StudentIntegratedQuizLogs/{doc_id}
+SUB_STUDENT_INTEGRATED_QUIZ_LOGS = "StudentIntegratedQuizLogs"
+# Organizations/{org_id}/AiTokenRollup/{category_id | __org__} — Gemini 토큰 누적(버킷별)
+SUB_AI_TOKEN_ROLLUP = "AiTokenRollup"
+AI_ROLLUP_ORG_WIDE_ID = "__org__"
+# Organizations/{org_id}/AiTokenEvents/{event_id} — 호출 1회당 로그(출처 추적)
+SUB_AI_TOKEN_EVENTS = "AiTokenEvents"
+
+# gemini_client / UI와 맞춤: 용도별 집계 키
+AI_USAGE_BUCKETS: tuple[str, ...] = (
+    "teacher_lesson",  # 수업 관리: 요약·퀴즈·노트·키워드 등
+    "teacher_profile",  # 교사: 학생 학습 프로필 분석
+    "teacher_course_stats",  # 교사: 수업 통계 AI 분석
+    "student_chat",  # 학생: 주차 AI 질문/답변
+    "student_quiz",  # 학생: 통합 퀴즈 코치·해설
+    "operator",  # 운영: 교사 피드백 초안 등
+)
+
+# 세부 기능 집계 — AiTokenRollup 문서에 kind_{code}_prompt 등으로 누적 (표시용 한글 라벨)
+AI_USAGE_KIND_LABELS_KO: dict[str, str] = {
+    "lesson_summary_keywords": "수업 요약·키워드 (자료 학습)",
+    "lesson_quiz_json": "객관식 퀴즈 풀 생성·저장",
+    "lesson_quiz_markdown": "주차 퀴즈 (마크다운·TXT 배포)",
+    "lesson_one_page_note": "한 페이지 요약 노트",
+    "lesson_keywords_only": "키워드만 재추출",
+    "student_week_ai_chat": "학생 수강·주차 AI 질문",
+    "student_quiz_infinite_coach": "통합 퀴즈·무한 연습 코칭",
+    "student_quiz_mixed_review": "통합 퀴즈·연습 후 AI 해설",
+    "teacher_student_profile": "학생 학습 패턴 분석",
+    "teacher_course_analysis": "수업 통계 AI (교사)",
+    "operator_course_analysis": "수업 통계 AI (운영)",
+    "operator_feedback_draft": "운영→교사 피드백 초안",
+    "other": "기타·구버전 호출",
+}
 
 
 def get_organization(org_id: str) -> dict[str, Any] | None:
@@ -333,6 +369,116 @@ def list_student_lesson_questions_for_course_student(
     return out[:lim]
 
 
+def append_student_integrated_quiz_log(
+    org_id: str,
+    category_id: str,
+    student_uid: str,
+    *,
+    course_name: str,
+    event_type: str,
+    details: dict[str, Any],
+    student_email: str | None = None,
+    display_name: str | None = None,
+) -> str:
+    """통합 퀴즈(일괄·무한 연습) 활동을 저장. 정식 주차 퀴즈 제출과 별도."""
+    if not org_id or not category_id or not student_uid:
+        return ""
+    et = (event_type or "").strip() or "unknown"
+    db = get_firestore_client()
+    ref = (
+        db.collection(COL_ORGS)
+        .document(org_id)
+        .collection(SUB_CONTENT_CATEGORIES)
+        .document(category_id)
+        .collection(SUB_STUDENT_INTEGRATED_QUIZ_LOGS)
+        .document()
+    )
+    payload: dict[str, Any] = {
+        "org_id": org_id,
+        "category_id": category_id,
+        "course_name": (course_name or "").strip()[:500],
+        "student_uid": student_uid,
+        "student_email": (student_email or "").strip(),
+        "display_name": (display_name or "").strip(),
+        "event_type": et[:120],
+        "details": details or {},
+        "created_at": firestore.SERVER_TIMESTAMP,
+    }
+    ref.set(payload)
+    return ref.id
+
+
+def list_student_integrated_quiz_logs_for_course_student(
+    org_id: str,
+    category_id: str,
+    student_uid: str,
+    *,
+    limit: int = 150,
+) -> list[dict[str, Any]]:
+    """한 학생의 통합 퀴즈 연습 로그(최신순)."""
+    if not org_id or not category_id or not student_uid:
+        return []
+    lim = max(1, min(500, int(limit)))
+    db = get_firestore_client()
+    col = (
+        db.collection(COL_ORGS)
+        .document(org_id)
+        .collection(SUB_CONTENT_CATEGORIES)
+        .document(category_id)
+        .collection(SUB_STUDENT_INTEGRATED_QUIZ_LOGS)
+    )
+    rows: list[dict[str, Any]] = []
+    for doc in col.stream():
+        d = doc.to_dict() or {}
+        if str(d.get("student_uid") or "") != str(student_uid):
+            continue
+        d["_doc_id"] = doc.id
+        rows.append(d)
+
+    def _ts_key(x: dict[str, Any]) -> float:
+        ts = x.get("created_at")
+        if ts is None:
+            return 0.0
+        try:
+            if hasattr(ts, "timestamp"):
+                return float(ts.timestamp())
+        except (TypeError, ValueError, OSError):
+            pass
+        try:
+            return float(ts)
+        except (TypeError, ValueError):
+            return 0.0
+
+    rows.sort(key=_ts_key, reverse=True)
+    return rows[:lim]
+
+
+def summarize_org_learning_snapshot(org_id: str) -> dict[str, Any]:
+    """운영자 대시보드용 — 기업 단위 과목 수·인원·누적 AI 질문 건수(과목별 상한 500건 합산)."""
+    out: dict[str, Any] = {
+        "n_categories": 0,
+        "n_teachers": 0,
+        "n_students": 0,
+        "total_ai_questions": 0,
+    }
+    if not org_id:
+        return out
+    users = list_users_by_org(org_id)
+    out["n_teachers"] = sum(1 for u in users if str(u.get("role") or "") == "Teacher")
+    out["n_students"] = sum(1 for u in users if str(u.get("role") or "") == "Student")
+    cats = list_content_categories(org_id)
+    out["n_categories"] = len(cats)
+    total_q = 0
+    for c in cats:
+        cid = str(c.get("_doc_id") or "")
+        if cid:
+            total_q += len(
+                list_student_lesson_questions_for_course(org_id, cid, limit=500)
+            )
+    out["total_ai_questions"] = total_q
+    return out
+
+
 def count_users_by_org(org_id: str) -> int:
     """동일 org_id 사용자 수(데모·운영자 화면용)."""
     db = get_firestore_client()
@@ -420,6 +566,175 @@ def list_users_by_org(org_id: str) -> list[dict[str, Any]]:
         out.append(d)
     out.sort(key=lambda x: (str(x.get("role", "")), str(x.get("email", ""))))
     return out
+
+
+def list_pending_join_requests(org_id: str) -> list[dict[str, Any]]:
+    """기업별 초대 소속 승인 대기 목록(최신순)."""
+    if not org_id or not str(org_id).strip():
+        return []
+    db = get_firestore_client()
+    col = (
+        db.collection(COL_ORGS)
+        .document(org_id)
+        .collection(SUB_ORG_JOIN_REQUESTS)
+    )
+    rows: list[dict[str, Any]] = []
+    for doc in col.stream():
+        d = doc.to_dict() or {}
+        if str(d.get("status") or "pending") != "pending":
+            continue
+        d["_doc_id"] = doc.id
+        rows.append(d)
+
+    def _ts_key(x: dict[str, Any]) -> float:
+        ts = x.get("created_at")
+        if ts is None:
+            return 0.0
+        try:
+            if hasattr(ts, "timestamp"):
+                return float(ts.timestamp())
+        except (TypeError, ValueError, OSError):
+            pass
+        return 0.0
+
+    rows.sort(key=_ts_key, reverse=True)
+    return rows
+
+
+def submit_org_join_request(
+    uid: str,
+    email: str,
+    display_name: str,
+    org_id: str,
+    requested_role: str,
+) -> None:
+    """초대 코드로 소속을 **신청**만 저장. 승인 전까지 role 은 User 유지."""
+    uid = str(uid).strip()
+    org_id = str(org_id).strip()
+    if not uid or not org_id:
+        raise ValueError("uid 와 org_id 가 필요합니다.")
+    rr = str(requested_role).strip()
+    if rr not in ("Teacher", "Student"):
+        raise ValueError("requested_role 은 Teacher 또는 Student 여야 합니다.")
+    db = get_firestore_client()
+    prof = get_user(uid)
+    if prof:
+        old_org = str(prof.get("pending_org_id") or "").strip()
+        if prof.get("membership_pending") and old_org and old_org != org_id:
+            db.collection(COL_ORGS).document(old_org).collection(
+                SUB_ORG_JOIN_REQUESTS
+            ).document(uid).delete()
+
+    req_ref = (
+        db.collection(COL_ORGS)
+        .document(org_id)
+        .collection(SUB_ORG_JOIN_REQUESTS)
+        .document(uid)
+    )
+    req_ref.set(
+        {
+            "uid": uid,
+            "email": (email or "").strip(),
+            "display_name": (display_name or "").strip(),
+            "requested_role": rr,
+            "status": "pending",
+            "created_at": firestore.SERVER_TIMESTAMP,
+        }
+    )
+    uref = db.collection(COL_USERS).document(uid)
+    uref.set(
+        {
+            "uid": uid,
+            "email": (email or "").strip(),
+            "display_name": (display_name or "").strip(),
+            "role": "User",
+            "org_id": None,
+            "membership_pending": True,
+            "pending_org_id": org_id,
+            "pending_role": rr,
+        },
+        merge=True,
+    )
+
+
+def approve_org_join_request(org_id: str, uid: str) -> None:
+    """운영자 승인: User → Teacher/Student 반영, JoinRequests 문서 삭제."""
+    org_id = str(org_id).strip()
+    uid = str(uid).strip()
+    if not org_id or not uid:
+        raise ValueError("org_id 와 uid 가 필요합니다.")
+    db = get_firestore_client()
+    req_ref = (
+        db.collection(COL_ORGS)
+        .document(org_id)
+        .collection(SUB_ORG_JOIN_REQUESTS)
+        .document(uid)
+    )
+    req_snap = req_ref.get()
+    if not req_snap.exists:
+        raise RuntimeError("승인할 요청이 없습니다.")
+    req = req_snap.to_dict() or {}
+    role = str(req.get("requested_role") or "").strip()
+    if role not in ("Teacher", "Student"):
+        raise RuntimeError("요청 역할이 올바르지 않습니다.")
+    prof = get_user(uid)
+    if not prof:
+        raise RuntimeError("사용자를 찾을 수 없습니다.")
+    if str(prof.get("pending_org_id") or "").strip() != org_id:
+        raise RuntimeError("사용자의 대기 요청이 이 기업과 일치하지 않습니다.")
+    email = str(prof.get("email") or "")
+    display_name = str(prof.get("display_name") or "").strip() or (
+        email.split("@")[0] if email else "사용자"
+    )
+    org = get_organization(org_id)
+    if not org:
+        raise RuntimeError("기업을 찾을 수 없습니다.")
+    if role == "Student":
+        max_slots = int(org.get("max_slots") or 0)
+        if count_students_in_org(org_id) >= max_slots:
+            raise RuntimeError(
+                "학생 슬롯이 가득 찼습니다. 승인할 수 없습니다. (슬롯을 늘리거나 다른 학생을 조정하세요.)"
+            )
+    upsert_user(uid, email, role, org_id, display_name=display_name)
+    uref = db.collection(COL_USERS).document(uid)
+    uref.set(
+        {
+            "membership_pending": False,
+            "pending_org_id": None,
+            "pending_role": None,
+        },
+        merge=True,
+    )
+    req_ref.delete()
+
+
+def reject_org_join_request(org_id: str, uid: str) -> None:
+    """운영자 거절: JoinRequests 삭제, 사용자는 User 로 유지."""
+    org_id = str(org_id).strip()
+    uid = str(uid).strip()
+    if not org_id or not uid:
+        raise ValueError("org_id 와 uid 가 필요합니다.")
+    db = get_firestore_client()
+    req_ref = (
+        db.collection(COL_ORGS)
+        .document(org_id)
+        .collection(SUB_ORG_JOIN_REQUESTS)
+        .document(uid)
+    )
+    if req_ref.get().exists:
+        req_ref.delete()
+    prof = get_user(uid)
+    if prof and str(prof.get("pending_org_id") or "").strip() == org_id:
+        db.collection(COL_USERS).document(uid).set(
+            {
+                "role": "User",
+                "org_id": None,
+                "membership_pending": False,
+                "pending_org_id": None,
+                "pending_role": None,
+            },
+            merge=True,
+        )
 
 
 def list_content_categories(org_id: str) -> list[dict[str, Any]]:
@@ -683,8 +998,8 @@ def ensure_lesson_weeks_seeded(
                 # off | open_anytime | after_video
                 "quiz_mode": "off",
                 "quiz_source": "manual",
-                "quiz_item_count": 5,
-                "quiz_pass_min": 5,
+                "quiz_item_count": 10,
+                "quiz_pass_min": 8,
                 "quiz_manual_items": [],
                 "quiz_ai_items": [],
                 "org_id": org_id,
@@ -715,8 +1030,8 @@ def _default_lesson_week_payload(
         "ai_one_page_note": "",
         "quiz_mode": "off",
         "quiz_source": "manual",
-        "quiz_item_count": 5,
-        "quiz_pass_min": 5,
+        "quiz_item_count": 10,
+        "quiz_pass_min": 8,
         "quiz_manual_items": [],
         "quiz_ai_items": [],
         "org_id": org_id,
@@ -892,6 +1207,7 @@ def get_student_lesson_progress_fields(
         "quiz_attempt_count": 0,
         "quiz_wrong_indices": [],
         "quiz_wrong_count": 0,
+        "quiz_pool_indices": [],
     }
     if not uid or not org_id or not category_id or not week_doc_id:
         return out
@@ -942,6 +1258,17 @@ def get_student_lesson_progress_fields(
         out["quiz_wrong_count"] = max(0, int(d.get("quiz_wrong_count") or len(wi_list)))
     except (TypeError, ValueError):
         out["quiz_wrong_count"] = len(wi_list)
+    raw_pi = d.get("quiz_pool_indices")
+    pi_list: list[int] = []
+    if isinstance(raw_pi, list):
+        for x in raw_pi:
+            try:
+                ix = int(x)
+                if 0 <= ix < 100:
+                    pi_list.append(ix)
+            except (TypeError, ValueError):
+                pass
+    out["quiz_pool_indices"] = pi_list
     return out
 
 
@@ -955,6 +1282,7 @@ def merge_student_lesson_quiz_result(
     quiz_total: int,
     quiz_passed: bool,
     quiz_wrong_indices: list[int] | None = None,
+    quiz_pool_indices: list[int] | None = None,
 ) -> None:
     """주차별 퀴즈 제출 결과를 LessonProgress에 merge. 제출마다 quiz_attempt_count 가산."""
     if not uid or not org_id or not category_id or not week_doc_id:
@@ -983,20 +1311,31 @@ def merge_student_lesson_quiz_result(
                     wi.append(ix)
             except (TypeError, ValueError):
                 pass
+    payload: dict[str, Any] = {
+        "org_id": org_id,
+        "category_id": category_id,
+        "week_doc_id": week_doc_id,
+        "quiz_correct": max(0, int(quiz_correct)),
+        "quiz_total": max(0, int(quiz_total)),
+        "quiz_passed": bool(quiz_passed),
+        "quiz_attempt_count": prev_att + 1,
+        "quiz_wrong_indices": wi,
+        "quiz_wrong_count": len(wi),
+        "quiz_updated_at": firestore.SERVER_TIMESTAMP,
+        "updated_at": firestore.SERVER_TIMESTAMP,
+    }
+    if quiz_pool_indices is not None:
+        pi: list[int] = []
+        for x in quiz_pool_indices:
+            try:
+                ix = int(x)
+                if 0 <= ix < 100:
+                    pi.append(ix)
+            except (TypeError, ValueError):
+                pass
+        payload["quiz_pool_indices"] = pi
     ref.set(
-        {
-            "org_id": org_id,
-            "category_id": category_id,
-            "week_doc_id": week_doc_id,
-            "quiz_correct": max(0, int(quiz_correct)),
-            "quiz_total": max(0, int(quiz_total)),
-            "quiz_passed": bool(quiz_passed),
-            "quiz_attempt_count": prev_att + 1,
-            "quiz_wrong_indices": wi,
-            "quiz_wrong_count": len(wi),
-            "quiz_updated_at": firestore.SERVER_TIMESTAMP,
-            "updated_at": firestore.SERVER_TIMESTAMP,
-        },
+        payload,
         merge=True,
     )
 
@@ -1026,6 +1365,7 @@ def reset_student_lesson_quiz_progress(
             "quiz_attempt_count": 0,
             "quiz_wrong_indices": [],
             "quiz_wrong_count": 0,
+            "quiz_pool_indices": [],
             "quiz_updated_at": firestore.SERVER_TIMESTAMP,
             "updated_at": firestore.SERVER_TIMESTAMP,
         },
@@ -1167,3 +1507,253 @@ def delete_content_category(org_id: str, category_id: str) -> None:
         .document(category_id)
         .delete()
     )
+
+
+def normalize_ai_usage_bucket(raw: str) -> str:
+    s = (raw or "").strip()
+    if s in AI_USAGE_BUCKETS:
+        return s
+    return "teacher_lesson"
+
+
+def normalize_usage_kind(raw: str | None) -> str | None:
+    """세부 기능 코드. 미지정이면 None(구버전 호환). 알 수 없는 문자열은 other."""
+    if raw is None or not str(raw).strip():
+        return None
+    s = str(raw).strip().lower().replace("-", "_")
+    if s in AI_USAGE_KIND_LABELS_KO:
+        return s
+    return "other"
+
+
+def kind_metrics_from_rollup_doc(doc: dict[str, Any]) -> dict[str, dict[str, int]]:
+    """Rollup 문서의 kind_* 필드를 {코드: {prompt, completion, calls}} 로 묶는다."""
+    codes: set[str] = set()
+    for k in doc:
+        if k.startswith("kind_") and k.endswith("_prompt"):
+            codes.add(k[5:-7])
+    out: dict[str, dict[str, int]] = {}
+    for code in codes:
+        p = int(doc.get(f"kind_{code}_prompt") or 0)
+        c = int(doc.get(f"kind_{code}_completion") or 0)
+        n = int(doc.get(f"kind_{code}_calls") or 0)
+        if p or c or n:
+            out[code] = {"prompt": p, "completion": c, "calls": n}
+    return out
+
+
+def aggregate_ai_usage_kinds_for_org(org_id: str) -> dict[str, dict[str, int]]:
+    """기업 내 모든 수업·__org__ rollup을 합산한 세부 기능별 총계."""
+    oid = (org_id or "").strip()
+    merged: dict[str, dict[str, int]] = {}
+    if not oid:
+        return merged
+    db = get_firestore_client()
+    coll = (
+        db.collection(COL_ORGS).document(oid).collection(SUB_AI_TOKEN_ROLLUP)
+    )
+    for snap in coll.stream():
+        d = snap.to_dict() or {}
+        for code, m in kind_metrics_from_rollup_doc(d).items():
+            if code not in merged:
+                merged[code] = {"prompt": 0, "completion": 0, "calls": 0}
+            merged[code]["prompt"] += m["prompt"]
+            merged[code]["completion"] += m["completion"]
+            merged[code]["calls"] += m["calls"]
+    return merged
+
+
+def increment_ai_token_rollup(
+    org_id: str,
+    *,
+    category_id: str | None,
+    bucket: str,
+    prompt_tokens: int,
+    completion_tokens: int,
+    model: str | None = None,
+    usage_kind: str | None = None,
+) -> None:
+    """성공한 Gemini 호출 1회분을 버킷별로 누적한다."""
+    oid = (org_id or "").strip()
+    if not oid:
+        return
+    b = normalize_ai_usage_bucket(bucket)
+    pt = max(0, int(prompt_tokens))
+    ct = max(0, int(completion_tokens))
+    if pt == 0 and ct == 0:
+        return
+    doc_id = (category_id or "").strip() or AI_ROLLUP_ORG_WIDE_ID
+    db = get_firestore_client()
+    ref = (
+        db.collection(COL_ORGS)
+        .document(oid)
+        .collection(SUB_AI_TOKEN_ROLLUP)
+        .document(doc_id)
+    )
+    patch: dict[str, Any] = {
+        f"{b}_prompt": firestore.Increment(pt),
+        f"{b}_completion": firestore.Increment(ct),
+        f"{b}_calls": firestore.Increment(1),
+        "updated_at": firestore.SERVER_TIMESTAMP,
+    }
+    if model:
+        patch[f"{b}_last_model"] = str(model)[:120]
+    uk = normalize_usage_kind(usage_kind)
+    if uk:
+        prefix = f"kind_{uk}"
+        patch[f"{prefix}_prompt"] = firestore.Increment(pt)
+        patch[f"{prefix}_completion"] = firestore.Increment(ct)
+        patch[f"{prefix}_calls"] = firestore.Increment(1)
+        if model:
+            patch[f"{prefix}_last_model"] = str(model)[:120]
+    ref.set(patch, merge=True)
+
+
+def get_ai_token_rollup_doc(org_id: str, category_id: str | None) -> dict[str, Any]:
+    oid = (org_id or "").strip()
+    if not oid:
+        return {}
+    doc_id = (category_id or "").strip() or AI_ROLLUP_ORG_WIDE_ID
+    db = get_firestore_client()
+    snap = (
+        db.collection(COL_ORGS)
+        .document(oid)
+        .collection(SUB_AI_TOKEN_ROLLUP)
+        .document(doc_id)
+        .get()
+    )
+    if not snap.exists:
+        return {}
+    return dict(snap.to_dict() or {})
+
+
+def aggregate_ai_usage_buckets_for_org(org_id: str) -> dict[str, dict[str, int]]:
+    """기업 내 모든 AiTokenRollup 문서를 합산해 버킷별 총계를 만든다."""
+    oid = (org_id or "").strip()
+    out: dict[str, dict[str, int]] = {
+        b: {"prompt": 0, "completion": 0, "calls": 0} for b in AI_USAGE_BUCKETS
+    }
+    if not oid:
+        return out
+    db = get_firestore_client()
+    coll = (
+        db.collection(COL_ORGS).document(oid).collection(SUB_AI_TOKEN_ROLLUP)
+    )
+    for snap in coll.stream():
+        d = snap.to_dict() or {}
+        for b in AI_USAGE_BUCKETS:
+            out[b]["prompt"] += int(d.get(f"{b}_prompt") or 0)
+            out[b]["completion"] += int(d.get(f"{b}_completion") or 0)
+            out[b]["calls"] += int(d.get(f"{b}_calls") or 0)
+    return out
+
+
+def rollup_doc_ids_for_org(org_id: str) -> list[str]:
+    oid = (org_id or "").strip()
+    if not oid:
+        return []
+    db = get_firestore_client()
+    coll = (
+        db.collection(COL_ORGS).document(oid).collection(SUB_AI_TOKEN_ROLLUP)
+    )
+    return [s.id for s in coll.stream()]
+
+
+def append_ai_token_event(
+    org_id: str,
+    *,
+    category_id: str | None,
+    bucket: str,
+    prompt_tokens: int,
+    completion_tokens: int,
+    model: str | None = None,
+    usage_kind: str | None = None,
+    actor_uid: str | None = None,
+    actor_role: str | None = None,
+    actor_display_name: str | None = None,
+) -> None:
+    """Gemini 호출 1건을 이벤트로 남긴다(입·출력이 어떤 기능에서 발생했는지 추적)."""
+    oid = (org_id or "").strip()
+    if not oid:
+        return
+    b = normalize_ai_usage_bucket(bucket)
+    pt = max(0, int(prompt_tokens))
+    ct = max(0, int(completion_tokens))
+    if pt == 0 and ct == 0:
+        return
+    cat_val: str | None = None
+    if category_id and str(category_id).strip():
+        cat_val = str(category_id).strip()
+    db = get_firestore_client()
+    ref = (
+        db.collection(COL_ORGS)
+        .document(oid)
+        .collection(SUB_AI_TOKEN_EVENTS)
+        .document()
+    )
+    uk = normalize_usage_kind(usage_kind)
+    ev: dict[str, Any] = {
+        "created_at": firestore.SERVER_TIMESTAMP,
+        "category_id": cat_val,
+        "bucket": b,
+        "prompt_tokens": pt,
+        "completion_tokens": ct,
+        "model": (str(model)[:120] if model else ""),
+    }
+    if uk:
+        ev["usage_kind"] = uk
+    au = (actor_uid or "").strip()
+    if au:
+        ev["actor_uid"] = au
+    ar = (actor_role or "").strip()
+    if ar:
+        ev["actor_role"] = ar
+    adn = (actor_display_name or "").strip()
+    if adn:
+        ev["actor_display_name"] = adn
+    ref.set(ev)
+
+
+def list_recent_ai_token_events(org_id: str, *, limit: int = 200) -> list[dict[str, Any]]:
+    """최근 AI 토큰 이벤트(시간 역순). Firestore 단일 필드 정렬."""
+    oid = (org_id or "").strip()
+    if not oid:
+        return []
+    lim = max(1, min(2500, int(limit)))
+    db = get_firestore_client()
+    coll = (
+        db.collection(COL_ORGS).document(oid).collection(SUB_AI_TOKEN_EVENTS)
+    )
+    try:
+        from google.cloud.firestore_v1 import Query as FsQuery
+
+        q = coll.order_by(
+            "created_at",
+            direction=FsQuery.DESCENDING,
+        ).limit(lim)
+        out: list[dict[str, Any]] = []
+        for d in q.stream():
+            row = dict(d.to_dict() or {})
+            row["_doc_id"] = d.id
+            out.append(row)
+        return out
+    except Exception:
+        # 정렬 인덱스 미생성 등 — 최근 문서만 대략적으로 (문서 수가 적을 때)
+        out = []
+        for d in coll.limit(lim).stream():
+            row = dict(d.to_dict() or {})
+            row["_doc_id"] = d.id
+            out.append(row)
+        def _ts_key(v: Any) -> float:
+            if v is None:
+                return 0.0
+            try:
+                return float(v.timestamp())
+            except Exception:
+                return 0.0
+
+        try:
+            out.sort(key=lambda r: _ts_key(r.get("created_at")), reverse=True)
+        except Exception:
+            pass
+        return out[:lim]

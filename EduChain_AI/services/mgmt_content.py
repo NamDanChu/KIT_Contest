@@ -10,6 +10,7 @@ from services.firestore_repo import (
     delete_content_category,
     list_content_categories,
     list_users_by_org,
+    summarize_org_learning_snapshot,
     update_content_category,
 )
 
@@ -23,6 +24,20 @@ def render_org_content_tab(org_id: str, org_name: str) -> None:
     st.caption(
         f"**{org_name}** · 카테고리(수업·반·과목 영역)를 만들고, 소속 **교사**를 배치합니다. "
         "각 과목을 펼치면 **교사 화면과 동일한 수업 통계**를 보고, **교사·학생 피드백**을 남길 수 있습니다."
+    )
+
+    snap = summarize_org_learning_snapshot(org_id)
+    m1, m2, m3, m4 = st.columns(4)
+    with m1:
+        st.metric("등록 과목 수", f"{snap['n_categories']}개")
+    with m2:
+        st.metric("소속 교사", f"{snap['n_teachers']}명")
+    with m3:
+        st.metric("소속 학생", f"{snap['n_students']}명")
+    with m4:
+        st.metric("누적 AI 질문(과목 합산·상한/과목)", f"{snap['total_ai_questions']}건")
+    st.caption(
+        "AI 질문 건수는 모든 과목의 저장된 질문 문서 수를 합산합니다(과목당 최대 500건까지 조회)."
     )
 
     users = list_users_by_org(org_id)

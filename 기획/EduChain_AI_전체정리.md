@@ -60,8 +60,9 @@
 | `uid` | Firebase Auth UID (PK) |
 | `email` | 이메일 |
 | `display_name` | 표시 이름 |
-| `role` | `Teacher` / `Student` / `Operator` |
-| `org_id` | 소속 조직 (FK) |
+| `role` | `Teacher` / `Student` / `Operator` / `User`(소속 전·초대 승인 대기 등) |
+| `org_id` | 소속 조직 (FK, 없을 수 있음) |
+| `membership_pending` 등 | 초대 소속 **승인 대기** 시 플래그·`pending_org_id`·`pending_role`(선택) |
 
 ### `ChatLogs`
 
@@ -83,6 +84,10 @@
 | `.../ContentCategories/{category_id}/LessonWeeks/{week_doc_id}` | 주차별 수업 설계. `week_index`, `title`, `learning_goals`, `lesson_video_url`, `live_session_active`, 공개·기간(`access_mode`, `window_*`) 등 |
 | `Users/{uid}/LessonProgress/{doc_id}` | 학생·수업·주차별 **시청 진행률** `progress_percent`(0~100), 영상 재생 위치 **`last_video_position_sec`**, **`video_duration_sec`**(클라이언트 주기 저장). **퀴즈(마지막 제출 스냅샷)**: `quiz_correct` / `quiz_total`, `quiz_passed`, **`quiz_attempt_count`**(제출할 때마다 +1), **`quiz_wrong_indices`**(0-based 오답 문항 인덱스), `quiz_wrong_count`. `doc_id`는 org+category+week 해시 규칙 |
 | `.../ContentCategories/{category_id}/StudentLessonQuestions/{doc_id}` | 해당 수업에서 학생 **AI 채팅 질문·답변** 로그. `question`, `answer`, `week_doc_id`, `week_title`, **`video_position_sec`**, **`video_position_label`** 등(질문 시점 영상 위치) |
+| `.../ContentCategories/{category_id}/StudentIntegratedQuizLogs/{doc_id}` | **통합 퀴즈**(연습) 활동 로그 — 일괄 채점·무한 연습 정답 확인·세션 종료 등(교사 코칭용) |
+| `Organizations/{org_id}/JoinRequests/{uid}` | 초대 코드 **소속 신청** 승인 대기(운영자 승인 후 `Users` 역할·소속 반영) |
+| `Organizations/{org_id}/AiTokenRollup/{category_id \| __org__}` | **Gemini 토큰 누적** — 용도 **버킷**별(`teacher_lesson`, `student_chat` 등) `*_prompt` / `*_completion` / `*_calls`, 세부 기능별 `kind_{usage_kind}_*` 필드(merge + increment) |
+| `Organizations/{org_id}/AiTokenEvents/{event_id}` | **호출 1건 로그** — `usage_kind`, `bucket`, 토큰 수, `actor_uid` / `actor_role` / `actor_display_name`(로그인 사용자), `category_id`, 시각 등 |
 
 **기타**  
 - `ChatLogs` — 범용 채팅 로그(초기 설계). 학생 수강 AI는 위 `StudentLessonQuestions`에 **수업·주차 맥락**을 붙여 저장하는 쪽으로 보강됨.
@@ -105,9 +110,9 @@
 | 페이지 / 모듈 | 역할 요약 |
 |---------------|-----------|
 | `Home.py` | 진입, 멀티페이지 네비, 로그인 시 사용자 블록 |
-| `pages/1_Login.py` | 이메일·Google·초대 가입 |
-| `pages/2_관리.py` | 운영자: 기업·플랜·슬롯·사용자·콘텐츠 카테고리·교사 배치 |
-| `pages/3_Teacher.py` | 교사: 수업 선택 후 **개요** / **학생 관리** / **수업 통계** / **수업 관리**(주차·영상·AI·질문 로그 등) |
+| `pages/1_Login.py` | 이메일·Google·초대 가입·**운영자/유저 회원가입**·비밀번호 확인·가입 후 승인 흐름 안내 |
+| `pages/2_관리.py` | 운영자: 기업·플랜·슬롯·사용자·콘텐츠 카테고리·교사 배치 — 기업 상세 사이드바 **AI 토큰 활용량** 탭(전사·수업별·사용자별·최근 호출) |
+| `pages/3_Teacher.py` | 교사: 수업 선택 후 **개요** / **학생 관리** / **수업 통계** / **AI 토큰 활용량** / **수업 관리**(주차·영상·AI·질문 로그 등) |
 | `pages/4_학생관리.py` | (교사 전용 플로우 연결용) 학생 관리 보조 |
 | `pages/5_Student.py` | 학생: **개요** → 수업 선택 → **수업 개요** / **수업 수강**(주차 목록·영상 플레이어·우측 패널) |
 | `services/student_portal.py` | 학생 개요·주차 목록·수강 플레이어(YouTube/Vimeo/HTML5, 진행률 저장, 우측 AI/라이브/개요) |
@@ -115,7 +120,12 @@
 | `services/lesson_mgmt_ui.py` | 교사 수업 관리 패널(주차 CRUD, 영상 URL, 라이브 토글 등) |
 | `services/course_stats_ui.py` | **수업 통계**(교사·운영자 공통): 수강 인원, 주차 카드·상세(해당 주차 **퀴즈 응시·제출·오답 합·문항별 오답 빈도**), 질문 요약, **전체 퀴즈 집계**(응시 횟수 합·제출 건수·오답 문항 수 합), Gemini **수업 전반 분석**(`quiz_block`에 집계 반영), 운영자 모드 시 피드백·**AI 교사 피드백 초안** |
 | `services/mgmt_content.py` | 운영자 콘텐츠: 카테고리·교사 배치(설명·하위 JSON 필드는 UI에서 제거, DB 기존값 유지) |
-| `services/gemini_client.py` | 수업 통계 분석(`analyze_course_statistics`, `quiz_block`), **학습 프로필 분석**(`analyze_student_learning_profile` — **퀴즈 요약 `quiz_summary_block`** 포함), 운영자 피드백 초안, 주차 맥락 질문 답변(`answer_student_lesson_question`) 등 |
+| `services/mgmt_people.py` | 교사·학생: 초대 코드·**가입 승인 대기**·계정 생성·**소속 사용자 목록**(검색·정렬·표 선택→상세·편집·삭제) |
+| `services/student_quiz_mix.py` | **통합 퀴즈**(일괄/무한), AI 코칭 버튼, Firestore 로그 append |
+| `services/auth_session.py` | 로그인 후 프로필 동기화·초대 승인 대기·`User` Home 초대 신청 등 |
+| `services/gemini_client.py` | 수업 통계 분석(`analyze_course_statistics`, `quiz_block`), **학습 프로필 분석**(`analyze_student_learning_profile` — **퀴즈 요약 `quiz_summary_block`** 포함), 운영자 피드백 초안, 주차 맥락 질문 답변(`answer_student_lesson_question`) 등 — 성공 시 **`usage_metadata` 토큰**을 읽어 Firestore **누적·이벤트** 기록(`usage` dict: `org_id`, `category_id`, `bucket`, `usage_kind`) |
+| `services/ai_usage_ui.py` | **AI 토큰 활용량** UI — 용도/세부 기능/수업별 표·**matplotlib 가로 막대** 차트(미설치 시 `st.bar_chart` 폴백), **사용자 검색**, 교사·운영 공통 패널 |
+| `services/firestore_repo.py` | `increment_ai_token_rollup`, `append_ai_token_event`, `aggregate_ai_usage_*`, `list_recent_ai_token_events` 등 |
 
 **학생 수강 UX 요약**  
 - 사이드바: 개요, 수업 선택(selectbox), 수업 개요 / 수업 수강.  
@@ -123,8 +133,8 @@
 - **Streamlit `st.fragment`(≥1.33)** 으로 우측만 갱신해 영상 iframe 재마운트를 줄임; 우측 패널 접기 시 CSS로 열 비율 조정.  
 - 저장된 `progress_percent`로 재생 시작 위치 근처 **seek**(YouTube/Vimeo/HTML5).  
 - AI 질문은 Firestore `StudentLessonQuestions`에 저장 → 교사 **개요** 탭에서 **학생 AI 질문** 목록으로 확인. 질문 시점 **영상 위치**(초·라벨) 저장 가능.
-- **교사** **수업 통계**·**학생 관리**(정보 보기): 주차별 완료·질문·**퀴즈(응시·오답·틀린 문항 지문)**·Gemini 분석(**학생 분석에 퀴즈 요약 반영**); 분석 결과는 **expander**로 접기.
-- **운영자** **콘텐츠·통계**: 과목별로 교사와 동일한 통계·운영자→교사/학생 피드백·AI 초안; **학생 수업 개요**에 운영자 공지 표시.
+- **교사** **수업 통계**·**학생 관리**(정보 보기): 주차별 완료·질문·**퀴즈(응시·오답·틀린 문항 지문)**·Gemini 분석(**학생 분석에 퀴즈 요약 반영**); 분석 결과는 **expander**로 접기. **AI 토큰 활용량** 전용 메뉴에서 선택 수업 기준 토큰·세부 기능·**사용자별**·최근 호출(검색 가능).
+- **운영자** **콘텐츠·통계**: 과목별로 교사와 동일한 통계·운영자→교사/학생 피드백·AI 초안; **학생 수업 개요**에 운영자 공지 표시. **관리 → 기업 → AI 토큰 활용량** 에서 기업 전체·수업별·**사용자별**·최근 호출(검색 가능).
 
 ---
 
@@ -135,6 +145,29 @@
 | Starter | 무료 체험 | 5명 | 기본 RAG 채팅(텍스트) |
 | Pro | ₩190,000 | 50명 | PDF 분석, AI 퀴즈, 질문 통계 |
 | Premium | ₩450,000 | 150명 | 영상 자막 분석(확장), 지원, 슬롯 확장 |
+
+**코드 연동:** `Organizations.max_slots`, `plan` — `services/plan_limits.py` 등과 연계. 현재는 **좌석(학생 수)** 중심이다.
+
+### 5.1 비즈니스 모델 확장 방향 (학생 수 외 — 기획 메모)
+
+학생 수만 과금하면 **AI API 변동비**(Gemini 호출 횟수·토큰·모델 단가 차이)를 가격에 반영하기 어렵다. 아래를 **과금 축** 후보로 두고, 우선순위·측정 가능 여부·고객 설명 난이도 순으로 검토하는 것을 권장한다.
+
+| 축 | 설명 | 구현·운영 시 유의점 |
+|----|------|---------------------|
+| **좌석(학생 슬롯)** | 기존 — 조직이 동시에 둘 학생 계정 상한 | 이미 `max_slots`·승인 시 학생 수 집계와 연동 |
+| **AI 사용량(량·가중치)** | 월·일 단위 **호출 수**, 또는 **추정 토큰**(입력+출력) 합 | 기능별 가중치 예: 주차 채팅 1, 퀴즈 생성 3, 수업 통계 분석 5, 통합 퀴즈 코칭 1 등. Firestore `UsageDaily/{orgId_YYYYMM}` 또는 `Organizations/{org}/Usage/{period}` 누적 |
+| **모델 티어** | 기본 **Flash** vs 옵션 **Pro**(또는 최신 고가 모델) | `Organizations.ai_model_tier` 또는 플랜별 기본값; `gemini_client`에서 모델명 분기 |
+| **공정 사용·상한** | 플랜별 **월 AI 크레딧**(포인트) 또는 **소프트 캡** 초과 시 알림·제한 | 초과 시: 기능 비활성 / 업셀 안내 / 익월 리셋 명시 |
+| **투명성** | 운영자 화면에 **“이번 달 추정 사용량·남은 한도”** | Stripe 등 **정액+초과 종량**과 조합 가능 |
+
+**권장 순서 (제품·엔지니어링)**
+
+1. **관측**: Gemini 호출 지점마다 `org_id`·`feature`(enum)·`input_chars`/`approx_tokens`·`model_id`를 구조화 로그(또는 Firestore append + 일 배치 집계).  
+2. **내부 원가 추정**: Google AI Studio·청구서 기준으로 **건당·토큰당** 대략 단가 표를 만들고, 플랜별 마진 목표와 맞춰 **포인트 환산** 또는 **포함 토큰** 설계.  
+3. **가격·패키지**: “학생 N명 + 월 AI 크레딤 M” **번들**로 팔지, 좌석과 크레딧을 **분리 과금**할지 결정.  
+4. **강제 순서**: 알림(80%/100%) → 읽기 전용 → 유료 업셀 (학습 연속성을 해치지 않는 순으로).
+
+**관련 코드 앵커:** `services/gemini_client.py`의 `_generate` 및 `_record_gemini_usage` — 성공 응답의 **`usage_metadata`** 로 입력·출력 토큰을 읽고, `firestore_repo.increment_ai_token_rollup` / `append_ai_token_event`에 전달한다. 기능별 태그는 `usage_kind`(예: `lesson_quiz_json`, `student_week_ai_chat`)로 통일.
 
 ---
 
@@ -357,11 +390,14 @@ services/adapters/  → Firebase·Gemini 구체 구현 (필요 시 분리)
 
 | 영역 | 구현 내용 |
 |------|-----------|
-| 인증·운영자 | Firebase Auth, `Users`/`Organizations`, 관리 화면(플랜·슬롯·초대·콘텐츠 카테고리·교사 배치). **콘텐츠 탭**에서 과목별 **수업 통계**(교사 화면과 동일 UI)·**운영자 피드백**(교사/학생용 필드)·**AI 교사 피드백 초안** |
-| 교사 | 수업 선택, **개요**·**학생 관리**·**수업 통계**·**수업 관리**. 개요: 운영자 피드백 표시, 학생 AI 질문·영상 위치. **학생 관리**: 학생별 상세·주차 질문·**주차별 퀴즈·오답(지문 일부)**·**학생 AI 분석**(프롬프트에 **퀴즈 요약** 포함). **수업 통계**: 주차 카드·질문·**퀴즈 집계**(전체·선택 주차)·**수업 전반 AI 분석**(퀴즈 집계 문자열 반영, expander) |
-| 학생 | 개요, 수업 개요(**운영자 공지**), **주차별 수강** + 영상 진행률·**재생 위치 스냅샷** + 우측 AI 채팅 + **주차 퀴즈** 제출 시 오답 인덱스·응시 횟수 저장(`merge_student_lesson_quiz_result`) |
-| 데이터·집계 | `LessonWeeks`, `LessonProgress`(진행률·영상 초·**퀴즈 필드**), `StudentLessonQuestions`(질문+영상 위치), 카테고리에 운영자 피드백 필드. **`aggregate_quiz_stats_for_course`** 로 배정 학생×주차 퀴즈 집계 |
-| UX | `session_keys` 상수, 사이드바(교사: 수업 통계 메뉴), 수강 플레이어 `st.fragment`·CSS, **AI 분석 긴 본문은 expander**로 스크롤 부담 완화 |
+| 인증·가입 | **회원가입 시 운영자/유저 선택**, 유저는 학원명 없이 가입 후 **Home에서 초대 코드 소속 신청**. **초대 가입·Home 신청**은 즉시 소속이 아니라 **`JoinRequests` + 운영자 승인** 후 `Teacher`/`Student` 반영. **비밀번호 확인** 필드. `User`·승인 후 역할은 **`refresh_session_from_firestore`** 등으로 세션 동기화 |
+| 인증·운영자 | Firebase Auth, `Users`/`Organizations`, 관리 화면(플랜·슬롯·초대·콘텐츠 카테고리·교사 배치). 기업 상세 **AI 토큰 활용량** 탭. **교사·학생 탭**: **가입 승인 대기**, **소속 사용자 목록**(검색·정렬·스크롤 표·행 선택→상세 연동)·상세에서 **정보 변경·삭제**(기본 정보 탭과 유사). **콘텐츠 탭**에서 과목별 **수업 통계**(운영자 모드 시 상단 **AI 토큰 요약**)·**운영자 피드백**·**AI 교사 피드백 초안** |
+| 교사 | 수업 선택, **개요**·**학생 관리**·**수업 통계**·**AI 토큰 활용량**·**수업 관리**. 학생 상세에 **통합 퀴즈(연습) 기록**(Firestore 로그). 퀴즈·AI 분석·expander 등; **수업 통계** 탭은 AI 토큰 상세 대신 **AI 토큰 메뉴** 안내 |
+| 학생 | 개요, 수업 개요, **주차별 수강** + 퀴즈·진행률 등. **통합 퀴즈** 메뉴: 일괄/무한 연습, **AI 코칭 요약 버튼**, 활동 로그 저장 |
+| 데이터·집계 | 상기 + `StudentIntegratedQuizLogs`, `JoinRequests`, 사용자 `membership_pending` 계열. **`aggregate_quiz_stats_for_course`** 등 기존 집계 유지 |
+| UX | `session_keys` 상수, 사이드바, 수강 플레이어 `st.fragment`·CSS, AI 본문 expander, 관리 소속 목록 표 상호작용 |
+| 과금(현재) | **`max_slots`·`plan`** 중심 — AI 변동비·모델 티어는 **§5.1**에서 확장 검토 중 |
+| **AI 사용량(관측)** | **운영·교사 화면**에서 Gemini **입·출력 토큰**·호출 수·세부 기능(`usage_kind`)·**호출자(actor)** 를 집계·검색 가능 — 과금 연동 전 **미터링** 단계 |
 
 **아직 기획서 전체와의 갭·보완 포인트**  
 - **퀴즈 데이터 일관성**: 구버전 제출만 있고 `quiz_attempt_count` 등이 비어 있으면 UI상 “응시 0회” 등과 불일치할 수 있음 → 재제출 또는 마이그레이션 검토.  

@@ -14,6 +14,7 @@ from services.session_keys import (
     AUTH_UID,
     STUDENT_COURSE_SUB_TAB,
     STUDENT_LEARN_WEEK_ID,
+    STUDENT_QUIZ_MIX_PHASE,
     STUDENT_QUIZ_WEEK_ID,
     STUDENT_SELECTED_CATEGORY_ID,
     STUDENT_VIEW_TAB,
@@ -24,11 +25,13 @@ from services.sidebar_helpers import (
     render_sidebar_user_block,
     render_student_sidebar,
 )
+from services import ui_messages
 from services.student_portal import (
     render_student_course_learn,
     render_student_course_overview,
     render_student_overview,
 )
+from services.student_quiz_mix import render_student_quiz_mix
 
 st.set_page_config(
     page_title="학생 — EduChain AI",
@@ -59,12 +62,16 @@ email = str(st.session_state.get(AUTH_EMAIL) or "")
 org_name = str(st.session_state.get(AUTH_ORG_NAME) or "")
 
 if not org_id:
-    st.warning("소속 기업이 설정되지 않았습니다. 운영자에게 문의하세요.")
+    ui_messages.info_org_missing()
     st.stop()
 
 courses = list_content_categories_for_student(org_id, uid)
 view = str(st.session_state.get(STUDENT_VIEW_TAB) or "overview")
+if view not in ("overview", "course", "quiz_mix"):
+    view = "overview"
+    st.session_state[STUDENT_VIEW_TAB] = view
 sub = str(st.session_state.get(STUDENT_COURSE_SUB_TAB) or "overview")
+mix_phase = str(st.session_state.get(STUDENT_QUIZ_MIX_PHASE) or "setup")
 
 # 사이드바(render_student_sidebar)와 동일하게 선택 수업을 맞춤. 안 맞추면
 # STUDENT_LEARN_WEEK_ID만 남아 in_learn_player=True → 사이드바 숨김인데
@@ -87,8 +94,9 @@ in_quiz_exam = (
     and sub == "learn"
     and bool(st.session_state.get(STUDENT_QUIZ_WEEK_ID))
 )
+in_quiz_mix_exam = view == "quiz_mix" and mix_phase in ("run", "done", "inf_run")
 
-if not in_learn_player and not in_quiz_exam:
+if not in_learn_player and not in_quiz_exam and not in_quiz_mix_exam:
     render_student_sidebar()
     render_sidebar_user_block(
         logout_key="sidebar_logout_student",
@@ -103,13 +111,36 @@ if view == "overview":
         email=email,
         courses=courses,
     )
+elif view == "quiz_mix":
+    cat_id = st.session_state.get(STUDENT_SELECTED_CATEGORY_ID)
+    if not courses:
+        ui_messages.info_student_no_course()
+        st.stop()
+    if not cat_id:
+        ui_messages.info_student_pick_course_sidebar()
+        st.stop()
+
+    cat = get_content_category(org_id, str(cat_id))
+    if not cat:
+        st.error("수업 정보를 불러올 수 없습니다.")
+        st.stop()
+
+    course_name = str(cat.get("name") or "(이름 없음)")
+    render_student_quiz_mix(
+        org_id=org_id,
+        category_id=str(cat_id),
+        course_name=course_name,
+        student_uid=uid,
+        student_email=email,
+        display_name=display_name,
+    )
 else:
     cat_id = st.session_state.get(STUDENT_SELECTED_CATEGORY_ID)
     if not courses:
-        st.info("배정된 수업이 없습니다. **개요**에서 안내를 확인하세요.")
+        ui_messages.info_student_no_course()
         st.stop()
     if not cat_id:
-        st.info("왼쪽 **수업 선택**에서 수업을 고른 뒤 **수업 개요** 또는 **수업 수강**을 누르세요.")
+        ui_messages.info_student_pick_course_sidebar()
         st.stop()
 
     cat = get_content_category(org_id, str(cat_id))

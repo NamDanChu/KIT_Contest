@@ -20,13 +20,16 @@ from services.firestore_repo import (
     get_user,
     list_content_categories_for_teacher,
     list_lesson_weeks,
+    list_student_integrated_quiz_logs_for_course_student,
     list_student_lesson_questions_for_course,
     list_student_lesson_questions_for_course_student,
     list_users_by_org,
     update_content_category,
 )
-from services.quiz_items import quiz_session_params
+from services.quiz_items import session_items_for_progress_review
 from services import gemini_client
+from services import ui_messages
+from services.ai_usage_ui import render_teacher_ai_usage_panel
 from services.course_stats_ui import render_course_statistics_panel
 from services.lesson_access import week_access_label_short
 from services.lesson_mgmt_ui import render_lesson_management_panel
@@ -239,7 +242,7 @@ def _render_student_info_panel(
                 + (" · 합격" if pq.get("quiz_passed") else " · 미합격(기준 미달 가능)")
             )
             week_doc = get_lesson_week(org_id, category_id, sel_wid) or {}
-            session_items, _ = quiz_session_params(week_doc)
+            session_items = session_items_for_progress_review(week_doc, pq)
             raw_ix = pq.get("quiz_wrong_indices") or []
             indices: list[int] = []
             for x in raw_ix:
@@ -263,6 +266,29 @@ def _render_student_info_panel(
                 st.caption(
                     "(문항 텍스트를 불러오지 못했습니다. 수업 관리에서 해당 주차 퀴즈 문항을 확인하세요.)"
                 )
+
+    st.markdown("##### 통합 퀴즈(연습) 기록")
+    st.caption(
+        "학생이 **통합 퀴즈**에서 연습한 내용입니다. 정식 주차 퀴즈 제출·성적과는 별도로 저장됩니다."
+    )
+    iq_rows = list_student_integrated_quiz_logs_for_course_student(
+        org_id, category_id, student_uid, limit=120
+    )
+    _et_mix = {
+        "infinite_answer": "무한 연습 · 정답 확인",
+        "infinite_session_end": "무한 연습 · 세션 종료",
+        "batch_complete": "일괄 연습 · 채점 완료",
+    }
+    if not iq_rows:
+        st.caption("(통합 퀴즈 연습 기록이 없습니다.)")
+    else:
+        st.caption(f"최근 **{len(iq_rows)}**건까지 표시합니다.")
+        for r in iq_rows[:80]:
+            et = str(r.get("event_type") or "")
+            ts = _fmt_question_ts(r.get("created_at"))
+            title = _et_mix.get(et, et or "기록")
+            with st.expander(f"{ts} · {title}", expanded=False):
+                st.json(r.get("details") or {})
 
     st.divider()
     st.markdown("##### AI 학습 분석")
@@ -311,7 +337,7 @@ def _render_student_info_panel(
                 f"- {wt}: 정답 {qc}/{qt}, 응시(제출) {att}회, {pass_lbl}"
             )
             week_doc = get_lesson_week(org_id, category_id, wid) or {}
-            session_items, _ = quiz_session_params(week_doc)
+            session_items = session_items_for_progress_review(week_doc, pq)
             raw_ix = pq.get("quiz_wrong_indices") or []
             wrong_snips: list[str] = []
             seen: set[int] = set()
@@ -336,10 +362,7 @@ def _render_student_info_panel(
         return weeks_lines, questions_block, quiz_block
 
     if not gemini_client.get_api_key():
-        st.warning(
-            "Gemini API 키가 없습니다. `.streamlit/secrets.toml`에 `GEMINI_API_KEY`를 설정하면 "
-            "분석을 사용할 수 있습니다."
-        )
+        ui_messages.warn_gemini_key_missing()
     elif st.button(
         "학생 분석하기",
         type="primary",
@@ -355,6 +378,12 @@ def _render_student_info_panel(
                     questions_block=questions_block,
                     total_questions=total_q,
                     quiz_summary_block=quiz_block,
+                    usage={
+                        "org_id": org_id,
+                        "category_id": category_id,
+                        "bucket": "teacher_profile",
+                        "usage_kind": "teacher_student_profile",
+                    },
                 )
         except Exception as e:
             err_s = str(e).lower()
@@ -398,18 +427,16 @@ cat_id = st.session_state.get(TEACHER_SELECTED_CATEGORY_ID)
 sub_id = str(st.session_state.get(TEACHER_SELECTED_SUB_ITEM_ID) or "")
 
 if not org_id:
-    st.warning("소속 기업이 설정되지 않았습니다. 운영자에게 문의하세요.")
+    ui_messages.info_org_missing()
     st.stop()
 
 cats = list_content_categories_for_teacher(org_id, uid)
 if not cats:
-    st.info(
-        "배정된 카테고리가 없습니다. 운영자에게 **관리 → 콘텐츠**에서 배정을 요청하세요."
-    )
+    ui_messages.info_teacher_no_category()
     st.stop()
 
 if not cat_id or not any(str(c.get("_doc_id")) == str(cat_id) for c in cats):
-    st.info("왼쪽 **교사 메뉴**에서 **수업 선택**으로 수업을 먼저 고르세요.")
+    ui_messages.info_teacher_select_course()
     st.stop()
 
 cur = next((c for c in cats if str(c.get("_doc_id")) == str(cat_id)), None)
@@ -434,7 +461,7 @@ st.session_state[TEACHER_LESSON_FINGERPRINT] = _fp
 
 st.session_state.setdefault(TEACHER_VIEW_TAB, "overview")
 tab = str(st.session_state.get(TEACHER_VIEW_TAB) or "overview")
-if tab not in ("overview", "students", "course_stats", "lesson_mgmt"):
+if tab not in ("overview", "students", "course_stats", "ai_usage", "lesson_mgmt"):
     tab = "overview"
     st.session_state[TEACHER_VIEW_TAB] = tab
 
@@ -686,6 +713,16 @@ elif tab == "course_stats":
     if ensure_lesson_week_indices_contiguous(org_id, str(cat_id)):
         st.rerun()
     render_course_statistics_panel(
+        org_id=org_id,
+        category_id=str(cat_id),
+        course_name=name or "(이름 없음)",
+    )
+
+elif tab == "ai_usage":
+    ensure_lesson_weeks_seeded(org_id, str(cat_id), default_weeks=3)
+    if ensure_lesson_week_indices_contiguous(org_id, str(cat_id)):
+        st.rerun()
+    render_teacher_ai_usage_panel(
         org_id=org_id,
         category_id=str(cat_id),
         course_name=name or "(이름 없음)",

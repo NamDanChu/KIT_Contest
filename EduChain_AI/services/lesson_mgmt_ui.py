@@ -11,6 +11,7 @@ import pandas as pd
 import streamlit as st
 
 from services import gemini_client
+from services import ui_messages
 from services.firestore_repo import (
     create_lesson_week,
     delete_lesson_week,
@@ -57,9 +58,9 @@ def _lm_sync_quiz_widgets_from_week(week: dict, category_id: str, sel_week_id: s
     if qs not in ("manual", "gemini"):
         qs = "manual"
     try:
-        ic = int(week.get("quiz_item_count") or 5)
+        ic = int(week.get("quiz_item_count") or 10)
     except (TypeError, ValueError):
-        ic = 5
+        ic = 10
     ic = max(1, min(50, ic))
     try:
         pm = int(week.get("quiz_pass_min") or ic)
@@ -71,6 +72,10 @@ def _lm_sync_quiz_widgets_from_week(week: dict, category_id: str, sel_week_id: s
     st.session_state[f"lm_quiz_source_{category_id}_{sel_week_id}"] = qs
     st.session_state[f"lm_quiz_item_count_{category_id}_{sel_week_id}"] = ic
     st.session_state[f"lm_quiz_pass_min_{category_id}_{sel_week_id}"] = pm
+    _gk = f"lm_quiz_generate_count_{category_id}_{sel_week_id}"
+    _ai_n = len(week.get("quiz_ai_items") or []) if isinstance(week.get("quiz_ai_items"), list) else 0
+    if _gk not in st.session_state:
+        st.session_state[_gk] = _ai_n if _ai_n > 0 else 50
     man = week.get("quiz_manual_items") or []
     if isinstance(man, list) and man:
         st.session_state[f"lm_quiz_manual_json_{category_id}_{sel_week_id}"] = json.dumps(
@@ -112,6 +117,11 @@ def render_lesson_management_panel(
     plan_label: str,
     sub_item_id: str,
 ) -> None:
+    gem_usage = {
+        "org_id": org_id,
+        "category_id": category_id,
+        "bucket": "teacher_lesson",
+    }
     ensure_lesson_weeks_seeded(org_id, category_id, default_weeks=3)
     weeks = list_lesson_weeks(org_id, category_id)
     if ensure_lesson_week_indices_contiguous(org_id, category_id):
@@ -398,7 +408,8 @@ def render_lesson_management_panel(
     st.markdown("**Gemini 객관식(JSON) 저장 상태**")
     if _n_ai > 0:
         st.success(
-            f"Firestore에 **{_n_ai}**개 문항이 저장되어 있습니다. 학생 화면에서 출제·채점에 사용됩니다."
+            f"Firestore에 **{_n_ai}**개 문항이 **풀**로 저장되어 있습니다. "
+            "학생에게는 아래 **한 응시당 출제 수**만큼 무작위로 뽑아 출제됩니다."
         )
     else:
         st.info(
@@ -421,15 +432,23 @@ def render_lesson_management_panel(
         key=f"lm_quiz_mode_{category_id}_{sel_week_id}",
     )
     st.number_input(
-        "출제·채점에 사용할 문항 수 (풀에 있는 문항 앞에서부터)",
+        "Gemini로 한 번에 생성·저장할 풀 문항 수",
+        min_value=1,
+        max_value=50,
+        step=1,
+        key=f"lm_quiz_generate_count_{category_id}_{sel_week_id}",
+        help="Firestore에 쌓이는 문항 **풀** 크기입니다. 기본 50. 많을수록 생성 시간·토큰이 늘 수 있습니다.",
+    )
+    st.number_input(
+        "한 응시당 출제·채점 문항 수",
         min_value=1,
         max_value=50,
         step=1,
         key=f"lm_quiz_item_count_{category_id}_{sel_week_id}",
-        help="등록된 문항이 이보다 적으면 있는 만큼만 출제됩니다.",
+        help="저장된 풀에서 **무작위로** 이만큼 뽑아 한 세트로 출제합니다. 풀보다 크면 풀 전체를 섞어 냅니다.",
     )
     _ic_for_pm = int(
-        st.session_state.get(f"lm_quiz_item_count_{category_id}_{sel_week_id}") or 5
+        st.session_state.get(f"lm_quiz_item_count_{category_id}_{sel_week_id}") or 10
     )
     _ic_for_pm = max(1, min(50, _ic_for_pm))
     st.number_input(
@@ -483,9 +502,9 @@ def render_lesson_management_panel(
             if qs not in qs_order:
                 qs = "manual"
             try:
-                ic = int(st.session_state.get(f"lm_quiz_item_count_{category_id}_{sel_week_id}") or 5)
+                ic = int(st.session_state.get(f"lm_quiz_item_count_{category_id}_{sel_week_id}") or 10)
             except (TypeError, ValueError):
-                ic = 5
+                ic = 10
             ic = max(1, min(50, ic))
             try:
                 pm = int(st.session_state.get(f"lm_quiz_pass_min_{category_id}_{sel_week_id}") or ic)
@@ -524,8 +543,8 @@ def render_lesson_management_panel(
                     else:
                         if qm != "off" and manual_items and len(manual_items) < ic:
                             st.warning(
-                                f"등록 문항({len(manual_items)}개)이 설정 문항 수({ic})보다 적습니다. "
-                                "학생에게는 앞에서부터 있는 만큼만 출제됩니다."
+                                f"등록 문항({len(manual_items)}개)이 **한 응시당 출제 수**({ic})보다 적습니다. "
+                                "학생에게는 있는 문항만으로 출제됩니다."
                             )
                         sess_n = min(ic, len(manual_items)) if manual_items else 0
                         pm_eff = min(pm, sess_n) if sess_n else min(pm, ic)
@@ -554,25 +573,35 @@ def render_lesson_management_panel(
             help="문항이 이미 있으면 위의 동의에 체크한 뒤 누르면 기존 세트를 지우고 다시 출제합니다.",
         ):
             try:
-                n = int(st.session_state.get(f"lm_quiz_item_count_{category_id}_{sel_week_id}") or 5)
+                n_pool = int(
+                    st.session_state.get(f"lm_quiz_generate_count_{category_id}_{sel_week_id}") or 50
+                )
             except (TypeError, ValueError):
-                n = 5
-            n = max(1, min(50, n))
+                n_pool = 50
+            n_pool = max(1, min(50, n_pool))
+            try:
+                ic_sess = int(
+                    st.session_state.get(f"lm_quiz_item_count_{category_id}_{sel_week_id}") or 10
+                )
+            except (TypeError, ValueError):
+                ic_sess = 10
+            ic_sess = max(1, min(50, ic_sess))
             try:
                 with st.spinner("Gemini가 객관식 JSON을 생성하는 중…"):
                     items = gemini_client.generate_quiz_items_json(
                         title=lesson_title,
                         learning_goals=goals_in,
                         source_text=ctx_quiz,
-                        num_questions=n,
+                        num_questions=n_pool,
+                        usage={**gem_usage, "usage_kind": "lesson_quiz_json"},
                     )
                 try:
                     pm = int(
-                        st.session_state.get(f"lm_quiz_pass_min_{category_id}_{sel_week_id}") or n
+                        st.session_state.get(f"lm_quiz_pass_min_{category_id}_{sel_week_id}") or ic_sess
                     )
                 except (TypeError, ValueError):
-                    pm = n
-                pm = max(1, min(n, pm))
+                    pm = ic_sess
+                pm = max(1, min(ic_sess, pm))
                 qm = str(st.session_state.get(f"lm_quiz_mode_{category_id}_{sel_week_id}") or "off")
                 if qm not in qm_order:
                     qm = "off"
@@ -582,7 +611,7 @@ def render_lesson_management_panel(
                     sel_week_id,
                     quiz_mode=qm,
                     quiz_source="gemini",
-                    quiz_item_count=n,
+                    quiz_item_count=ic_sess,
                     quiz_pass_min=pm,
                     quiz_ai_items=items,
                 )
@@ -608,7 +637,7 @@ def render_lesson_management_panel(
         st.markdown("##### 지식 주입")
         gem_ok = bool(gemini_client.get_api_key())
         if not gem_ok:
-            st.warning("**GEMINI_API_KEY** 가 없으면 AI 요약·퀴즈가 동작하지 않습니다. `.streamlit/secrets.toml` 을 확인하세요.")
+            ui_messages.warn_gemini_key_missing()
         else:
             st.caption(
                 "무료 API는 **분·일당 토큰 한도**가 있습니다. 429가 나오면 잠시 뒤 재시도하거나 "
@@ -675,6 +704,10 @@ def render_lesson_management_panel(
                                 learning_goals=goals_in,
                                 source_text=combined,
                                 meta_hint=meta_hint,
+                                usage={
+                                    **gem_usage,
+                                    "usage_kind": "lesson_summary_keywords",
+                                },
                             )
                             s.write("③ **Firestore** 저장 중…")
                             update_lesson_week(
@@ -758,6 +791,7 @@ def render_lesson_management_panel(
                         source_text=ctx_tools,
                         num_questions=int(n_quiz),
                         difficulty="중",
+                        usage={**gem_usage, "usage_kind": "lesson_quiz_markdown"},
                     )
                 update_lesson_week(
                     org_id,
@@ -799,6 +833,7 @@ def render_lesson_management_panel(
                         title=lesson_title,
                         learning_goals=goals_in,
                         source_text=ctx_tools,
+                        usage={**gem_usage, "usage_kind": "lesson_one_page_note"},
                     )
                 update_lesson_week(
                     org_id,
@@ -835,6 +870,7 @@ def render_lesson_management_panel(
                     kw2 = gemini_client.extract_keywords_line(
                         learning_goals=goals_in,
                         source_text=ctx_tools,
+                        usage={**gem_usage, "usage_kind": "lesson_keywords_only"},
                     )
                     update_lesson_week(
                         org_id,

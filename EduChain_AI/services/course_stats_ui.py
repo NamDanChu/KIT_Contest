@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 from collections import Counter
+from datetime import date, datetime, timedelta, timezone
 from typing import Any
 
+import pandas as pd
 import streamlit as st
 
 from services import gemini_client
+from services import ui_messages
 from services.firestore_repo import (
     aggregate_quiz_stats_for_course,
     get_content_category,
@@ -21,6 +24,68 @@ from services.firestore_repo import (
 
 def _student_uid(u: dict) -> str:
     return str(u.get("uid") or u.get("_doc_id") or "")
+
+
+def _row_created_date(r: dict[str, Any]) -> date | None:
+    ts = r.get("created_at")
+    if ts is None:
+        return None
+    try:
+        if hasattr(ts, "timestamp"):
+            dt = datetime.fromtimestamp(ts.timestamp(), tz=timezone.utc)
+            return dt.date()
+    except (TypeError, ValueError, OSError):
+        pass
+    try:
+        return datetime.fromtimestamp(float(ts), tz=timezone.utc).date()
+    except (TypeError, ValueError):
+        return None
+
+
+def _filter_questions_by_date_range(
+    rows: list[dict[str, Any]],
+    d_start: date,
+    d_end: date,
+) -> list[dict[str, Any]]:
+    if d_start > d_end:
+        d_start, d_end = d_end, d_start
+    out: list[dict[str, Any]] = []
+    for r in rows:
+        rd = _row_created_date(r)
+        if rd is None:
+            continue
+        if d_start <= rd <= d_end:
+            out.append(r)
+    return out
+
+
+def _questions_to_csv_bytes(rows: list[dict[str, Any]]) -> bytes:
+    rows_out: list[dict[str, Any]] = []
+    for r in rows:
+        ts = r.get("created_at")
+        ts_s = ""
+        if ts is not None:
+            try:
+                if hasattr(ts, "strftime"):
+                    ts_s = ts.strftime("%Y-%m-%d %H:%M:%S")
+                else:
+                    ts_s = str(ts)
+            except Exception:
+                ts_s = str(ts)
+        rows_out.append(
+            {
+                "created_at": ts_s,
+                "display_name": (r.get("display_name") or "").strip(),
+                "student_email": (r.get("student_email") or "").strip(),
+                "week_title": (r.get("week_title") or "").strip(),
+                "week_doc_id": str(r.get("week_doc_id") or ""),
+                "question": (r.get("question") or "").strip(),
+                "answer_excerpt": ((r.get("answer") or "").strip()[:2000]),
+                "video_position_label": (r.get("video_position_label") or "").strip(),
+            }
+        )
+    df = pd.DataFrame(rows_out)
+    return df.to_csv(index=False).encode("utf-8-sig")
 
 
 def _enrolled_student_ids(org_id: str, category_id: str) -> list[str]:
@@ -104,9 +169,7 @@ def _render_operator_feedback_form(
             help="위 과목 통계·질문 요약을 바탕으로 Gemini가 초안을 채웁니다. 이후 자유롭게 수정하세요.",
         ):
             if not gemini_client.get_api_key():
-                st.warning(
-                    "`.streamlit/secrets.toml`에 `GEMINI_API_KEY`가 있어야 AI 초안을 쓸 수 있습니다."
-                )
+                ui_messages.warn_gemini_key_missing()
             else:
                 try:
                     ctx = _build_operator_feedback_ai_context(org_id, category_id)
@@ -116,6 +179,12 @@ def _render_operator_feedback_form(
                             n_students=int(ctx["n"]),
                             weeks_summary_block=str(ctx["weeks_block"]),
                             questions_digest=str(ctx["questions_digest"]),
+                            usage={
+                                "org_id": org_id,
+                                "category_id": category_id,
+                                "bucket": "operator",
+                                "usage_kind": "operator_feedback_draft",
+                            },
                         )
                     st.session_state[kt] = draft.strip()
                     st.rerun()
@@ -181,13 +250,50 @@ def render_course_statistics_panel(
         st.caption(
             f"선택한 수업 **{course_name}** 의 수강 인원, 주차별 시청 완료, 질문·퀴즈(예정) 요약과 AI 분석입니다."
         )
+    if operator_mode:
+        from services.ai_usage_ui import render_course_ai_usage_summary
+
+        render_course_ai_usage_summary(
+            org_id=org_id,
+            category_id=category_id,
+            operator_view=True,
+        )
+    else:
+        st.caption(
+            "AI 토큰·사용자별 사용량은 왼쪽 메뉴 **「AI 토큰 활용량」** 에서 확인할 수 있습니다."
+        )
 
     enrolled = _enrolled_student_ids(org_id, category_id)
     n = len(enrolled)
     st.metric("이 수업 수강(배정) 학생 수", f"{n}명")
 
     weeks = list_lesson_weeks(org_id, category_id)
-    q_rows = list_student_lesson_questions_for_course(org_id, category_id, limit=200)
+    q_rows_full = list_student_lesson_questions_for_course(
+        org_id, category_id, limit=500
+    )
+    today = date.today()
+    use_all_q = st.checkbox(
+        "학생 AI 질문: 전체 기간",
+        value=True,
+        key=f"{pfx}faq_all_{category_id}",
+        help="끄면 아래 기간의 질문만 주차별 집계·CSV·AI 분석(질문 요약)에 반영됩니다.",
+    )
+    filter_label = "전체 기간"
+    if use_all_q:
+        q_rows = list(q_rows_full)
+    else:
+        dr = st.date_input(
+            "질문 조회 기간",
+            value=(today - timedelta(days=30), today),
+            key=f"{pfx}qdr_{category_id}",
+        )
+        if isinstance(dr, tuple) and len(dr) == 2:
+            d0, d1 = dr[0], dr[1]
+        else:
+            d0 = d1 = dr
+        q_rows = _filter_questions_by_date_range(q_rows_full, d0, d1)
+        filter_label = f"{d0} ~ {d1}"
+
     cnt_by_week = Counter(str(r.get("week_doc_id") or "") for r in q_rows)
     quiz_agg = aggregate_quiz_stats_for_course(org_id, category_id, enrolled, weeks)
     quiz_by_week: dict[str, dict[str, Any]] = quiz_agg.get("by_week") or {}
@@ -290,7 +396,18 @@ def render_course_statistics_panel(
                 st.caption("AI 요약이 아직 없습니다. 수업 관리에서 자료·요약을 반영할 수 있습니다.")
 
     st.markdown("##### 질문·참여 요약")
-    st.caption(f"저장된 **학생 AI 질문** 최근 기준 **{len(q_rows)}**건(상한 200)이 이 수업에 있습니다.")
+    st.caption(
+        f"범위: **{filter_label}** · 표시 **{len(q_rows)}**건 "
+        f"(저장 조회 {len(q_rows_full)}건, 상한 500) · `created_at` 없는 질문은 기간 필터에서 제외됩니다."
+    )
+    if q_rows:
+        st.download_button(
+            "질문 목록 CSV 다운로드",
+            data=_questions_to_csv_bytes(q_rows),
+            file_name=f"student_ai_questions_{category_id[:12]}.csv",
+            mime="text/csv",
+            key=f"{pfx}dl_csv_questions_{category_id}",
+        )
 
     st.markdown("##### 퀴즈·평가")
     ta = int(quiz_agg.get("total_attempts") or 0)
@@ -338,10 +455,7 @@ def render_course_statistics_panel(
     st.markdown("##### 수업 전반 AI 분석")
     cache_key = f"teacher_course_analysis_md_{category_id}"
     if not gemini_client.get_api_key():
-        st.warning(
-            "Gemini API 키가 없습니다. `.streamlit/secrets.toml`에 `GEMINI_API_KEY`를 설정하면 "
-            "분석을 사용할 수 있습니다."
-        )
+        ui_messages.warn_gemini_key_missing()
     elif st.button(
         "수업 통계 분석하기",
         type="primary",
@@ -367,6 +481,18 @@ def render_course_statistics_panel(
                     weeks_summary_block=weeks_summary_block,
                     quiz_block=quiz_block,
                     questions_digest=questions_digest,
+                    usage={
+                        "org_id": org_id,
+                        "category_id": category_id,
+                        "bucket": (
+                            "operator" if operator_mode else "teacher_course_stats"
+                        ),
+                        "usage_kind": (
+                            "operator_course_analysis"
+                            if operator_mode
+                            else "teacher_course_analysis"
+                        ),
+                    },
                 )
         except Exception as e:
             err_s = str(e).lower()
