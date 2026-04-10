@@ -412,7 +412,13 @@ if st.session_state.get(AUTH_ROLE) != "Teacher":
     st.error("교사(Teacher) 계정만 이 메뉴를 사용할 수 있습니다.")
     st.stop()
 
-render_teacher_sidebar()
+uid = st.session_state[AUTH_UID]
+org_id = (st.session_state.get(AUTH_ORG_ID) or "").strip()
+cats: list[dict[str, Any]] = []
+if org_id:
+    cats = list_content_categories_for_teacher(org_id, uid)
+
+render_teacher_sidebar(categories=cats if org_id else None)
 render_sidebar_user_block(
     logout_key="sidebar_logout_teacher",
     management_org_name=st.session_state.get(AUTH_ORG_NAME) or None,
@@ -421,16 +427,12 @@ render_sidebar_user_block(
 
 st.title("교사")
 
-uid = st.session_state[AUTH_UID]
-org_id = (st.session_state.get(AUTH_ORG_ID) or "").strip()
 cat_id = st.session_state.get(TEACHER_SELECTED_CATEGORY_ID)
 sub_id = str(st.session_state.get(TEACHER_SELECTED_SUB_ITEM_ID) or "")
 
 if not org_id:
     ui_messages.info_org_missing()
     st.stop()
-
-cats = list_content_categories_for_teacher(org_id, uid)
 if not cats:
     ui_messages.info_teacher_no_category()
     st.stop()

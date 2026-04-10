@@ -69,17 +69,46 @@ _KIND_DISPLAY_ORDER: tuple[str, ...] = (
 )
 
 
+_KOREAN_MPL_FONT_READY: bool = False
+
+
 def _configure_matplotlib_korean() -> None:
+    """배포 환경(Linux 등)에 시스템 한글 폰트가 없을 때를 대비해 번들 TTF를 등록한다."""
+    global _KOREAN_MPL_FONT_READY
     import matplotlib
+    from pathlib import Path
 
     matplotlib.rcParams["axes.unicode_minus"] = False
-    matplotlib.rcParams["font.sans-serif"] = [
+    if _KOREAN_MPL_FONT_READY:
+        return
+
+    font_path = (
+        Path(__file__).resolve().parent.parent
+        / "assets"
+        / "fonts"
+        / "NanumGothic-Regular.ttf"
+    )
+    fallback = [
         "Malgun Gothic",
         "NanumGothic",
         "Apple SD Gothic Neo",
         "Noto Sans CJK KR",
         "DejaVu Sans",
     ]
+    if font_path.is_file():
+        try:
+            from matplotlib import font_manager
+
+            font_manager.fontManager.addfont(str(font_path))
+            prop = font_manager.FontProperties(fname=str(font_path))
+            fam = prop.get_name()
+            matplotlib.rcParams["font.family"] = fam
+            matplotlib.rcParams["font.sans-serif"] = [fam, *fallback]
+        except Exception:
+            matplotlib.rcParams["font.sans-serif"] = fallback
+    else:
+        matplotlib.rcParams["font.sans-serif"] = fallback
+    _KOREAN_MPL_FONT_READY = True
 
 
 def _streamlit_fallback_bar_stacked(

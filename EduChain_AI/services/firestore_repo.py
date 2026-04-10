@@ -12,6 +12,7 @@ import secrets
 import string
 from typing import Any, Literal
 
+import streamlit as st
 from firebase_admin import firestore
 
 from .firebase_app import get_firestore_client
@@ -778,34 +779,64 @@ def get_content_category(org_id: str, category_id: str) -> dict[str, Any] | None
     return d
 
 
-def list_content_categories_for_teacher(org_id: str, teacher_uid: str) -> list[dict[str, Any]]:
-    """`teacher_uids`에 본인 UID가 포함된 콘텐츠 카테고리만 (정렬은 list_content_categories와 동일)."""
-    if not org_id or not str(org_id).strip() or not teacher_uid:
-        return []
-    uid = str(teacher_uid).strip()
+def _sort_content_categories(out: list[dict[str, Any]]) -> None:
+    out.sort(
+        key=lambda x: (
+            int(x.get("sort_order") or 0),
+            str(x.get("name") or ""),
+        )
+    )
+
+
+def _list_categories_array_contains(
+    org_id: str,
+    uid: str,
+    array_field: str,
+) -> list[dict[str, Any]]:
+    """Organizations/.../ContentCategories 에서 array_contains 단일 쿼리 (전체 스트림 생략)."""
+    db = get_firestore_client()
+    coll = (
+        db.collection(COL_ORGS)
+        .document(org_id.strip())
+        .collection(SUB_CONTENT_CATEGORIES)
+    )
     out: list[dict[str, Any]] = []
-    for c in list_content_categories(org_id):
-        raw = c.get("teacher_uids") or []
-        if not isinstance(raw, list):
-            continue
-        if uid in {str(x).strip() for x in raw if str(x).strip()}:
-            out.append(c)
+    for doc in coll.where(array_field, "array_contains", uid.strip()).stream():
+        d = doc.to_dict() or {}
+        d["_doc_id"] = doc.id
+        out.append(d)
+    _sort_content_categories(out)
     return out
 
 
+@st.cache_data(ttl=45, show_spinner=False)
+def list_content_categories_for_teacher(org_id: str, teacher_uid: str) -> list[dict[str, Any]]:
+    """`teacher_uids`에 본인 UID가 포함된 콘텐츠 카테고리만 (정렬은 list_content_categories와 동일).
+
+    Firestore ``array_contains`` + 짧은 TTL 캐시로 읽기량과 동일 rerun 내 중복 호출을 줄임.
+    """
+    if not org_id or not str(org_id).strip() or not teacher_uid:
+        return []
+    uid = str(teacher_uid).strip()
+    return _list_categories_array_contains(org_id, uid, "teacher_uids")
+
+
+@st.cache_data(ttl=45, show_spinner=False)
 def list_content_categories_for_student(org_id: str, student_uid: str) -> list[dict[str, Any]]:
     """`student_uids`에 본인 UID가 포함된 콘텐츠 카테고리만."""
     if not org_id or not str(org_id).strip() or not student_uid:
         return []
     uid = str(student_uid).strip()
-    out: list[dict[str, Any]] = []
-    for c in list_content_categories(org_id):
-        raw = c.get("student_uids") or []
-        if not isinstance(raw, list):
-            continue
-        if uid in {str(x).strip() for x in raw if str(x).strip()}:
-            out.append(c)
-    return out
+    return _list_categories_array_contains(org_id, uid, "student_uids")
+
+
+def invalidate_teacher_student_category_caches() -> None:
+    """카테고리 CRUD·배정 변경 직후 교사/학생 수업 목록 캐시를 비운다."""
+    try:
+        list_content_categories_for_teacher.clear()
+        list_content_categories_for_student.clear()
+    except Exception:
+        pass
 
 
 def normalize_category_sub_items(raw: Any) -> list[dict[str, str]]:
@@ -860,6 +891,7 @@ def create_content_category(
             "student_uids": [],
         }
     )
+    invalidate_teacher_student_category_caches()
     return cat_id
 
 
@@ -907,6 +939,7 @@ def update_content_category(
     if not data:
         return
     ref.set(data, merge=True)
+    invalidate_teacher_student_category_caches()
 
 
 def _lesson_weeks_coll(org_id: str, category_id: str):
@@ -1507,6 +1540,7 @@ def delete_content_category(org_id: str, category_id: str) -> None:
         .document(category_id)
         .delete()
     )
+    invalidate_teacher_student_category_caches()
 
 
 def normalize_ai_usage_bucket(raw: str) -> str:

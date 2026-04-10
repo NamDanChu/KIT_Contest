@@ -97,7 +97,7 @@ in_quiz_exam = (
 in_quiz_mix_exam = view == "quiz_mix" and mix_phase in ("run", "done", "inf_run")
 
 if not in_learn_player and not in_quiz_exam and not in_quiz_mix_exam:
-    render_student_sidebar()
+    render_student_sidebar(courses=courses)
     render_sidebar_user_block(
         logout_key="sidebar_logout_student",
         management_org_name=st.session_state.get(AUTH_ORG_NAME) or None,

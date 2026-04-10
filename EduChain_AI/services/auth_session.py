@@ -210,14 +210,28 @@ def join_organization_with_invite_for_user_session() -> None:
     st.session_state[AUTH_ORG_NAME] = ""
 
 
+_LAST_PROFILE_REFRESH_MONO = "_auth_last_profile_refresh_monotonic"
+_MIN_PROFILE_REFRESH_INTERVAL_SEC = 20.0
+
+
 def refresh_session_from_firestore() -> None:
-    """Firestore Users 프로필을 세션에 반영(운영자 승인 후 역할 갱신 등)."""
+    """Firestore Users 프로필을 세션에 반영(운영자 승인 후 역할 갱신 등).
+
+    Home 등에서 rerun마다 호출되므로, 짧은 간격으로만 실제 Firestore 읽기를 수행한다.
+    """
+    import time
+
     import streamlit as st
 
     init_firebase()
     uid = str(st.session_state.get(AUTH_UID) or "").strip()
     if not uid:
         return
+    now = time.monotonic()
+    last = float(st.session_state.get(_LAST_PROFILE_REFRESH_MONO, 0.0))
+    if now - last < _MIN_PROFILE_REFRESH_INTERVAL_SEC:
+        return
+    st.session_state[_LAST_PROFILE_REFRESH_MONO] = now
     prof = get_user(uid)
     if not prof:
         return
@@ -257,6 +271,7 @@ def clear_auth_session() -> None:
         TEACHER_SELECTED_SUB_ITEM_ID,
         TEACHER_VIEW_TAB,
         TEACHER_LESSON_FINGERPRINT,
+        _LAST_PROFILE_REFRESH_MONO,
     ):
         if key in st.session_state:
             del st.session_state[key]

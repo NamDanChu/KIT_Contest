@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 import streamlit as st
 
 from . import ui_messages
@@ -208,8 +210,14 @@ def get_teacher_category_sub_items(c: dict) -> list[dict[str, str]]:
     return [{"id": "_category", "label": "이 수업 영역", "icon": "✓"}]
 
 
-def render_teacher_sidebar() -> None:
-    """교사: 학생 메뉴와 동일한 레이아웃 — 개요 / 수업 선택(selectbox) / 영역 선택(복수 시) / 탭 버튼."""
+def render_teacher_sidebar(
+    *,
+    categories: list[dict[str, Any]] | None = None,
+) -> None:
+    """교사: 학생 메뉴와 동일한 레이아웃 — 개요 / 수업 선택(selectbox) / 영역 선택(복수 시) / 탭 버튼.
+
+    ``categories``: 페이지 본문에서 이미 조회한 목록을 넘기면 Firestore를 한 번만 읽는 효과(캐시와 중복 방지).
+    """
     from .firestore_repo import list_content_categories_for_teacher
 
     if st.session_state.get(AUTH_ROLE) != "Teacher":
@@ -229,7 +237,10 @@ def render_teacher_sidebar() -> None:
         ui_messages.sidebar_info_org_missing()
         return
 
-    cats = list_content_categories_for_teacher(org_id, str(uid))
+    if categories is not None:
+        cats = categories
+    else:
+        cats = list_content_categories_for_teacher(org_id, str(uid))
     doc_ids = [str(c.get("_doc_id") or "") for c in cats if c.get("_doc_id")]
     labels = {
         str(c.get("_doc_id") or ""): str(c.get("name") or "(이름 없음)")
@@ -342,8 +353,14 @@ def render_teacher_sidebar() -> None:
 render_teacher_sidebar_categories = render_teacher_sidebar
 
 
-def render_student_sidebar() -> None:
-    """학생: 교사 메뉴와 같은 톤 — 개요 / 수업 선택(selectbox) / 수업 개요·수업 수강·통합 퀴즈."""
+def render_student_sidebar(
+    *,
+    courses: list[dict[str, Any]] | None = None,
+) -> None:
+    """학생: 교사 메뉴와 같은 톤 — 개요 / 수업 선택(selectbox) / 수업 개요·수업 수강·통합 퀴즈.
+
+    ``courses``: ``5_Student`` 본문과 동일 목록을 넘기면 중복 조회를 피함.
+    """
     from .firestore_repo import list_content_categories_for_student
     from .student_quiz_mix import clear_quiz_mix_state_for_nav
 
@@ -367,7 +384,10 @@ def render_student_sidebar() -> None:
         ui_messages.sidebar_info_org_missing()
         return
 
-    cats = list_content_categories_for_student(org_id, str(uid))
+    if courses is not None:
+        cats = courses
+    else:
+        cats = list_content_categories_for_student(org_id, str(uid))
     doc_ids = [str(c.get("_doc_id") or "") for c in cats if c.get("_doc_id")]
     labels = {
         str(c.get("_doc_id") or ""): str(c.get("name") or "(이름 없음)")
