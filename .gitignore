@@ -64,3 +64,6 @@ Desktop.ini
 
 # --- Node (향후 도입 시) ---
 **/node_modules/
+
+# --- 제출 서류 ---
+**/제출서류/
